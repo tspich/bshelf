@@ -1,99 +1,173 @@
-use std::fs;
-use std::io;
-use std::path::PathBuf;
-use std::time::Duration;
 
-use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect, Alignment},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem},
+    text::Span,
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use serde::Deserialize;
-use serde_json::Value;
+use std::{fs, io};
+//use crate::lib::Reference;
+use refman::{Reference, new_project, add_reference, export_bibtex}; // <-- crate name = [package].name in Cargo.toml
 
-#[derive(Debug, Deserialize)]
-struct Reference {
-    title: String,
-    authors: Vec<String>,
-    year: u32,
-    doi: String,
+//#[derive(Deserialize, Debug, Clone)]
+//struct Reference {
+//    title: String,
+//    authors: Vec<String>,
+//    year: Option<u32>,
+//    doi: Option<String>,
+//    journal: Option<String>,
+//    volume: Option<String>,
+//    number: Option<String>,
+//    pages: Option<String>,
+//    issn: Option<String>,
+//    publisher: Option<String>,
+//    pdf: Option<String>,
+//}
+
+struct App {
+    projects: Vec<String>,
+    selected_project: usize,
+    references: Vec<Reference>,
+    selected_reference: usize,
+    mode: Mode,
+    search_mode: bool,
+    search_query: String,
+    filtered_refs: Vec<Reference>,
+    alert_message: Option<String>,
+    alert_timer: Option<std::time::Instant>,
 }
 
-#[derive(Default)]
-struct App {
-    projects: Vec<PathBuf>,
-    selected: usize,
-    references: Vec<Reference>,
+enum Mode {
+    Normal,
+    Search,
+    //Adding,
+    //Editing,
+    //Deleting,
 }
 
 impl App {
     fn new() -> Self {
-        let projects = fs::read_dir("projects")
-            .unwrap_or_else(|_| fs::read_dir(".").unwrap())
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
-            .collect();
-        Self {
+        let mut projects = vec![];
+        if let Ok(entries) = fs::read_dir("projects") {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.path().file_stem() {
+                    projects.push(name.to_string_lossy().to_string());
+                }
+            }
+        }
+        App {
             projects,
-            selected: 0,
+            selected_project: 0,
             references: vec![],
+            selected_reference: 0,
+            mode: Mode::Normal,
+            search_mode: false,
+            search_query: String::new(),
+            filtered_refs: Vec::new(),
+            alert_message: None,
+            alert_timer: None,
         }
     }
 
     fn load_references(&mut self) {
-        if let Some(project_path) = self.projects.get(self.selected) {
-            if let Ok(data) = fs::read_to_string(project_path) {
-                if let Ok(json) = serde_json::from_str::<Vec<Value>>(&data) {
-                    self.references = json
-                        .iter()
-                        .filter_map(|v| serde_json::from_value::<Reference>(v.clone()).ok())
-                        .collect();
+        if let Some(project) = self.projects.get(self.selected_project) {
+            let path = format!("projects/{}.json", project);
+            if let Ok(data) = fs::read_to_string(&path) {
+                if let Ok(refs) = serde_json::from_str::<Vec<Reference>>(&data) {
+                    self.references = refs;
+                    self.selected_reference = 0;
                 }
             }
         }
     }
 
-    fn next(&mut self) {
-        if !self.projects.is_empty() {
-            self.selected = (self.selected + 1) % self.projects.len();
-            self.load_references();
-        }
+    fn refresh_refs(&mut self) {
+        self.load_references();
     }
 
-    fn previous(&mut self) {
-        if !self.projects.is_empty() {
-            if self.selected == 0 {
-                self.selected = self.projects.len() - 1;
-            } else {
-                self.selected -= 1;
+    fn enter_search_mode(&mut self) {
+        self.mode = Mode::Search;
+        self.search_mode = true;
+        self.search_query.clear();
+    }
+
+    fn apply_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.filtered_refs.clear();
+            self.mode = Mode::Normal;
+            return;
+        }
+
+        self.filtered_refs = self
+            .references
+            .iter()
+            .filter(|r| {
+                r.title.to_lowercase().contains(&self.search_query.to_lowercase())
+                    || r
+                        .authors
+                        .iter()
+                        .any(|a| a.to_lowercase().contains(&self.search_query.to_lowercase()))
+            })
+            .cloned()
+            .collect();
+
+        self.selected_reference = 0;
+        self.search_mode = false;
+        self.mode = Mode::Normal;
+    }
+
+    fn show_alert(&mut self, msg: &str) {
+        self.alert_message = Some(msg.to_string());
+        self.alert_timer = Some(std::time::Instant::now());
+    }
+
+    fn clear_expired_alert(&mut self) {
+        if let Some(start) = self.alert_timer {
+            if start.elapsed().as_secs() > 3 {
+                self.alert_message = None;
+                self.alert_timer = None;
             }
-            self.load_references();
         }
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
+    enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::terminal::enable_raw_mode()?;
-    let backend = CrosstermBackend::new(&mut stdout);
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
 
     let mut app = App::new();
     app.load_references();
 
+
     loop {
+        // --- draw UI ---
         terminal.draw(|f| {
-            let size = f.size();
+            // make vertical layout: top = the three panels, bottom = search box (length 3)
+            let vchunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+                .split(f.size());
+
+            // top row: three panels
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
-                .split(size);
+                .constraints([
+                    Constraint::Percentage(20),
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(40),
+                ])
+                .split(vchunks[0]);
 
             // Left panel: projects
             let project_items: Vec<ListItem> = app
@@ -101,48 +175,214 @@ fn main() -> Result<()> {
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
-                    let style = if i == app.selected {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
+                    let style = if i == app.selected_project {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
-                    ListItem::new(p.file_name().unwrap().to_string_lossy().to_string()).style(style)
+                    ListItem::new(Span::styled(p, style))
                 })
                 .collect();
-
-            let projects = List::new(project_items)
+            let project_list = List::new(project_items)
                 .block(Block::default().title("Projects").borders(Borders::ALL));
-            f.render_widget(projects, chunks[0]);
+            f.render_widget(project_list, chunks[0]);
 
-            // Right panel: references
-            let ref_items: Vec<ListItem> = app
-                .references
+            // Middle panel: references - choose filtered list if present
+            let refs_to_show = if !app.filtered_refs.is_empty() {
+                &app.filtered_refs
+            } else {
+                &app.references
+            };
+
+            let ref_items: Vec<ListItem> = refs_to_show
                 .iter()
-                .map(|r| {
-                    let line = format!("{} ({})", r.title, r.year);
-                    ListItem::new(line)
+                .enumerate()
+                .map(|(i, r)| {
+                    let title = r.title.clone();
+                    let style = if i == app.selected_reference {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Span::styled(title, style))
                 })
                 .collect();
 
-            let refs = List::new(ref_items)
+            let ref_list = List::new(ref_items)
                 .block(Block::default().title("References").borders(Borders::ALL));
-            f.render_widget(refs, chunks[1]);
+            f.render_widget(ref_list, chunks[1]);
+
+            // Right panel: details - use refs_to_show and check bounds
+            let details = if !refs_to_show.is_empty() && app.selected_reference < refs_to_show.len() {
+                let r = &refs_to_show[app.selected_reference];
+                format!(
+                    "Title: {}\nAuthors: {}\nYear: {}\nJournal: {}\nVolume: {}\nNumber: {}\nPages: {}\nDOI: {}\nISSN: {}\nPublisher: {}",
+                    r.title,
+                    r.authors.join(", "),
+                    r.year.map_or("".to_string(), |y| y.to_string()),
+                    r.journal.as_deref().unwrap_or(""),
+                    r.volume.as_deref().unwrap_or(""),
+                    r.number.as_deref().unwrap_or(""),
+                    r.pages.as_deref().unwrap_or(""),
+                    r.doi.as_deref().unwrap_or(""),
+                    r.issn.as_deref().unwrap_or(""),
+                    r.publisher.as_deref().unwrap_or(""),
+                )
+            } else {
+                "No reference selected.".to_string()
+            };
+
+            let ref_para = Paragraph::new(details)
+                .block(Block::default().title("Details").borders(Borders::ALL))
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            f.render_widget(ref_para, chunks[2]);
+
+            // Bottom: search box (vchunks[1])
+            let search_text = if app.search_mode {
+            //let search_text = if app.mode = Mode::Search {
+                format!("/{}", app.search_query)
+            } else if !app.filtered_refs.is_empty() {
+                // show active filter
+                format!("Filter: {}", app.search_query)
+            } else {
+                String::from("Press / to search")
+            };
+            let search_para = Paragraph::new(search_text)
+                .block(Block::default().title("Search").borders(Borders::ALL));
+            f.render_widget(search_para, vchunks[1]);
+
+            if let Some(msg) = &app.alert_message {
+                let size = f.size();
+                let alert_height = 3;
+                let alert_width = msg.len() as u16 + 4; // padding
+                let x = (size.width.saturating_sub(alert_width)) / 2;
+                let y = size.height.saturating_sub(alert_height) - 1;
+
+                let area = Rect { x, y, width: alert_width, height: alert_height };
+
+                let paragraph = Paragraph::new(Span::styled(
+                    msg,
+                    Style::default().fg(Color::White).bg(Color::Red),
+                ))
+                .block(Block::default().borders(Borders::ALL))
+                .alignment(Alignment::Center);
+
+                f.render_widget(paragraph, area);
+            }
+
         })?;
 
-        if event::poll(Duration::from_millis(200))? {
+        if crossterm::event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Down => app.next(),
-                    KeyCode::Up => app.previous(),
+        
+                    // Navigation
+                    KeyCode::Up => {
+                        if app.selected_reference > 0 {
+                            app.selected_reference -= 1;
+                        }
+                    }
+        
+                    KeyCode::Down => {
+                        let active_refs = if !app.filtered_refs.is_empty() {
+                            &app.filtered_refs
+                        } else {
+                            &app.references
+                        };
+                        if app.selected_reference + 1 < active_refs.len() {
+                            app.selected_reference += 1;
+                        }
+                    }
+        
+                    KeyCode::Left => {
+                        if app.selected_project > 0 {
+                            app.selected_project -= 1;
+                            app.load_references();
+                            app.filtered_refs.clear();
+                        }
+                    }
+        
+                    KeyCode::Right => {
+                        if app.selected_project + 1 < app.projects.len() {
+                            app.selected_project += 1;
+                            app.load_references();
+                            app.filtered_refs.clear();
+                        }
+                    }
+        
+                    // 🔍 Enter search mode
+                    KeyCode::Char('/') => {
+                        app.enter_search_mode();
+                    }
+        
+                    // ⏎ Apply search OR open PDF
+                    KeyCode::Enter => {
+                        if app.search_mode {
+                            app.apply_search();
+                        } else {
+                            // Open PDF if available
+                            let active_refs = if !app.filtered_refs.is_empty() {
+                                &app.filtered_refs
+                            } else {
+                                &app.references
+                            };
+                            
+                            if let Some(r) = active_refs.get(app.selected_reference) {
+                                // Try using explicit pdf path from JSON first
+                                let pdf_path = if let Some(p) = &r.pdf {
+                                    std::path::PathBuf::from(p)
+                                } else if let Some(doi) = &r.doi {
+                                    // Sanitize DOI for filenames (replace '/' with '-')
+                                    let safe_name = doi.replace('/', "-");
+                                    std::path::Path::new("pdfs").join(format!("{safe_name}.pdf"))
+                                } else {
+                                    std::path::PathBuf::new()
+                                };
+                            
+                                if pdf_path.exists() {
+                                    if let Err(err) = std::process::Command::new("xdg-open")
+                                        .arg(&pdf_path)
+                                        .spawn()
+                                    {
+                                        eprintln!("Failed to open PDF: {}", err);
+                                    }
+                                } else {
+                                    //eprintln!("PDF not found: {}", pdf_path.display());
+                                    app.show_alert(&format!("PDF not found: {}", pdf_path.display()));
+                                }
+                            }
+                        }
+                    }
+        
+                    // Typing during search
+                    KeyCode::Char(c) if app.search_mode => {
+                        app.search_query.push(c);
+                    }
+        
+                    // Backspace during search
+                    KeyCode::Backspace if app.search_mode => {
+                        app.search_query.pop();
+                    }
+        
+                    // Cancel search
+                    KeyCode::Esc => {
+                        app.search_mode = false;
+                        app.search_query.clear();
+                        app.filtered_refs.clear();
+                    }
+        
                     _ => {}
                 }
+                app.clear_expired_alert();  
             }
         }
-    }
 
-    crossterm::terminal::disable_raw_mode()?;
+    } // end loop
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
     Ok(())
 }

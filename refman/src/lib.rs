@@ -7,12 +7,13 @@ use std::path::Path;
 use reqwest::blocking;
 use serde_json::Value;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Reference {
     pub title: String,
     pub authors: Vec<String>,
     pub year: Option<u32>,
     pub doi: Option<String>,
+    //pub abstract: Option<String>,
     pub journal: Option<String>,
     pub volume: Option<String>,
     pub number: Option<String>,
