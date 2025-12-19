@@ -1,11 +1,16 @@
 use serde::{Serialize, Deserialize};
-use serde_json;
+// use serde_json;
 use anyhow::Result;
 // use std::fmt::format;
 use std::fs;
 use std::path::Path;
+use std::ops::Range;
 use reqwest::blocking;
 use serde_json::Value;
+use biblatex::{Bibliography, Chunks, DateValue};
+use biblatex::{Entry, EntryType, PermissiveType};
+use biblatex::{Chunk, Spanned};
+use crossref::Crossref;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Reference {
@@ -13,21 +18,21 @@ pub struct Reference {
     pub authors: Vec<String>,
     pub year: Option<u32>,
     pub doi: Option<String>,
-    //pub abstract: Option<String>,
+    pub abstract_text: Option<String>,
     pub journal: Option<String>,
     pub volume: Option<String>,
     pub number: Option<String>,
     pub pages: Option<String>,
     pub issn: Option<String>,
-//pub isbn: Option<String>,
+    //pub isbn: Option<String>,
     pub publisher: Option<String>,
-    pub pdf: Option<String>,  // relative path to pdf if available
+    //pub pdf: Option<String>,  // relative path to pdf if available
 }
 
 /// Create a new project JSON file (empty list).
 pub fn new_project(project: &str) -> Result<()> {
     fs::create_dir_all("projects")?;
-    let proj_file = format!("projects/{}.json", project);
+    let proj_file = format!("projects/{}.bib", project);
     if !Path::new(&proj_file).exists() {
         fs::write(&proj_file, "[]")?;
         println!("Created new project: {}", project);
@@ -37,191 +42,301 @@ pub fn new_project(project: &str) -> Result<()> {
     Ok(())
 }
 
-/// Add a reference from a DOI (fetch Crossref + Unpaywall).
-pub fn add_reference(project: &str, doi: &str) -> Result<()> {
-    // fs::create_dir_all("projects")?;
-    //
-    // 1. Load existing references
-    let proj_file = format!("projects/{}.json", project);
-    let mut refs: Vec<Reference> = if let Ok(data) = fs::read_to_string(&proj_file) {
-        serde_json::from_str(&data).unwrap_or_else(|_| vec![])
-    } else {
-        vec![]
-    };
+fn field<S: AsRef<str>>(s: S) -> Vec<Spanned<Chunk>> {
+    vec![Spanned::detached(Chunk::Verbatim(s.as_ref().to_string()))]
+}
 
-    println!("📚 Existing references:");
-    for r in &refs {
-        println!(" - {}", r.doi.as_deref().unwrap_or("No DOI"));
+pub fn chunks_to_string(chunks: &[Spanned<Chunk>]) -> String {
+    chunks
+        .iter()
+        .map(|c| c.v.get())
+        .collect::<String>()
+}
+
+pub fn authors_to_string(authors: Vec<biblatex::Person>) -> String {
+    authors
+        .into_iter()
+        .map(|p| {
+            match (&p.name, &p.given_name) {
+                (g, f) => format!("{g} {f}"),
+                // (String::new(), f) => f.clone(),
+                // (g, "") => g.clone(),
+                // ("", "") => "<unknown>".to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn publisher_string(publisher: Vec<Chunks>) -> String {
+    publisher
+        .into_iter()
+        .map(|p| {
+            chunks_to_string(&p)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn date_to_year_string(
+    date: PermissiveType<biblatex::Date>,
+) -> Option<String> {
+    match date {
+        PermissiveType::Typed(d) => {
+            match d.value {
+                DateValue::At( year )
+                | DateValue::After( year ) => Some(year.to_string()),
+                _ => None,
+            }
+        }
+        PermissiveType::Chunks(_) => None,
     }
+}
 
-    // check duplicate
-    let doi_url = format!("https://doi.org/{}", doi);
-    if refs.iter().any(|r| r.doi.as_ref() == Some(&doi_url)) {
-        println!("⚠️ DOI {} already exists in project {}", doi_url, project);
+pub fn volume_string(
+    vol: PermissiveType<i64>,
+) -> Option<String> {
+    match vol {
+        PermissiveType::Typed(v) => {
+            Some(v.to_string())
+        }
+        PermissiveType::Chunks(_) => None,
+    }
+}
+
+pub fn pages_string(
+    pages: PermissiveType<Vec<Range<u32>>>,
+) -> Option<String> {
+    match pages {
+        PermissiveType::Typed(page) => {
+            Some(page
+                .into_iter()
+                .map(|p| {
+                    match (&p.start, &p.end) {
+                        (s, e) => format!("{s} {e}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "))
+
+        }
+        PermissiveType::Chunks(_) => None,
+    }
+}
+
+pub fn add_reference(project: &str, doi: &str) -> Result<()> {
+    let proj_file = Path::new("projects").join(format!("{project}.bib"));
+    fs::create_dir_all("projects")?;
+
+
+    // 1. Load bibliography
+    // let mut bib = load_bib(&proj_file)?;
+    let content = fs::read_to_string(&proj_file)?;
+    let mut bib = Bibliography::parse(&content)?;
+
+    let doi_url = format!("https://doi.org/{doi}");
+
+    // 2. Duplicate check
+    if bib.iter().any(|e| {
+        e.get("doi")
+            .map(|chunks|{
+                chunks.iter().any(|c| {
+                   c.v.get() == doi_url 
+                })
+            }) 
+            .unwrap_or(false)
+    }){
+        println!("⚠️ DOI already exists: {doi_url}");
         return Ok(());
     }
 
-    // Fetch metadata from Crossref
-    let crossref_url = format!("https://api.crossref.org/works/{}", doi);
-    let crossref_resp: Value = blocking::get(&crossref_url)?.json()?;
-    let item = &crossref_resp["message"];
+    // 3. Fetch Crossref
+    let client = Crossref::builder()
+        .build()
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-    let title = item["title"][0].as_str().unwrap_or("").to_string();
-    let authors: Vec<String> = item["author"]
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .map(|a| {
-            format!(
-                "{} {}",
-                a["given"].as_str().unwrap_or(""),
-                a["family"].as_str().unwrap_or("")
-            )
-            .trim()
-            .to_string()
+    let work = client
+        .work("10.1093/bioinformatics/btad696")
+        .map_err(|e| anyhow::anyhow!("crossref work error: {e:?}"))?;
+
+    let title = work
+        .title
+        .get(0)
+        .cloned()
+        .unwrap_or_else(|| "<no title>".to_string());
+
+    let journal = work
+        .container_title
+        .as_ref()
+        .and_then(|v| v.get(0))
+        .cloned()
+        .unwrap_or_default();
+
+    let year = work
+        .issued
+        .date_parts
+        .0
+        .get(0)
+        .and_then(|d| d.get(0))
+        .and_then(|d| d.map(|y| y.to_string()))
+        .unwrap_or_default();
+
+    let authors: Vec<String> = work
+        .author
+        .as_ref()
+        .map(|v| {
+            v.iter()
+                .map(|c| {
+                    let given = c.given.as_deref().unwrap_or("").trim();
+                    let family = c.family.clone();
+                    format!("{} {}", given, family).trim().to_string()
+                })
+                .collect()
         })
-        .collect();
-    let year = item["published"]["date-parts"][0][0].as_u64().map(|y| y as u32);
-    let journal = item["container-title"][0].as_str().unwrap_or("").to_string();
-    let volume = item["volume"].as_str().unwrap_or("").to_string();
-    let number = item["issue"].as_str().unwrap_or("").to_string();
-    let pages = item["pages"].as_str().unwrap_or("").to_string();
+        .unwrap_or_default();
 
-    let issn = item["issn-type"]
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .filter(|n| n.get("type").and_then(|t| t.as_str()) == Some("electronic"))
-        .map(|n| {
-            n.get("value")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        })
-        .collect::<Vec<String>>()
-        .join(", ");
+    let volume = work.volume.clone().unwrap_or_default();
+    let issue = work.issue.clone().unwrap_or_default();
+    let pages = work.page.clone().unwrap_or_default(); // note `page` field in Work
+    let issn = work.issn.as_ref().map(|v| v.join(", ")).unwrap_or_default();
+    let publisher = work.publisher.clone();
+    let doi_url = work.url.clone();
 
-    let publisher = item["publisher"].as_str().unwrap_or("").to_string();
+    let abstract_text = work
+        .abstract_
+        .as_ref()
+        .map(|s| s.clone())
+        .unwrap_or_default();
 
-    // 2. Unpaywall for PDF
-    let unpaywall_url = format!(
-        "https://api.unpaywall.org/v2/{}?email={}",
-        doi, "your@email.com"
+    // 4. Citation key
+    let key = format!(
+        "{}{}{}",
+        authors
+            .get(0)
+            .and_then(|a| a.split_whitespace().last())
+            .unwrap_or("ref")
+            .to_lowercase(),
+        year,
+        title
+            .split_whitespace()
+            .next()
+            .unwrap_or("ref")
+            .to_lowercase(),
     );
-    let unpaywall_resp: Value = blocking::get(&unpaywall_url)?.json()?;
-    let pdf_url = unpaywall_resp["best_oa_location"]["url_for_pdf"]
-        .as_str()
-        .map(|s| s.to_string());
 
-    let pdf_path = if let Some(url) = pdf_url {
+
+    // 5. Build BibTeX entry
+    let mut entry = Entry::new(key, EntryType::Article);
+
+    entry.set("title", field(title));
+    entry.set("author", field(authors.join(" and ")));
+    // entry.set("year", field(&year));
+    entry.set("date", field(&year));
+    entry.set("journal", field(journal));
+    entry.set("volume", field(&volume));
+    entry.set("issue", field(&issue));
+    entry.set("pages", field(&pages));
+    entry.set("issn", field(&issn));
+    entry.set("publisher", field(&publisher));
+    entry.set("doi", field(&doi));
+    entry.set("url", field(&doi_url));
+    entry.set("abstract", field(&abstract_text));
+
+
+    // 6. Unpaywall PDF
+    let unpaywall_url = format!(
+        "https://api.unpaywall.org/v2/{doi}?email=your@email.com"
+    );
+    let up: Value = blocking::get(&unpaywall_url)?.json()?;
+
+    if let Some(url) = up["best_oa_location"]["url_for_pdf"].as_str() {
         fs::create_dir_all("pdfs")?;
         let filename = doi.replace("/", "_") + ".pdf";
-        let full_path = format!("pdfs/{}", filename);
-    
-        let resp = blocking::get(&url)?;
-        if let Some(ct) = resp.headers().get("content-type") {
-            if ct.to_str().unwrap_or("").contains("pdf") {
-                let mut file = fs::File::create(&full_path)?;
-                let content = resp.bytes()?;
-                std::io::copy(&mut content.as_ref(), &mut file)?;
-                Some(full_path)
-            } else {
-                println!("⚠️ Not a PDF: {}", url);
-                None
-            }
-        } else {
-            None
+        let path = format!("pdfs/{filename}");
+
+        let resp = blocking::get(url)?;
+        if resp
+            .headers()
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            .map(|ct| ct.contains("pdf"))
+            .unwrap_or(false)
+        {
+            fs::write(&path, resp.bytes()?)?;
+            entry.set("file", field(path));
         }
-    } else {
-        None
-    };
+    }
 
+    // 7. Add + save
+    bib.insert(entry);
+    //save_bib(&proj_file, &bib)?;
+    fs::write(&proj_file, bib.to_bibtex_string())?;
 
-    // 4. Build Reference
-    let reference = Reference {
-        title,
-        authors,
-        year,
-        doi: Some(doi_url.clone()),
-        journal: Some(journal),
-        volume: Some(volume),
-        number: Some(number),
-        pages: Some(pages),
-        issn: Some(issn),
-        publisher: Some(publisher),
-        pdf: pdf_path,
-    };
-
-    refs.push(reference);
-    let serialized = serde_json::to_string_pretty(&refs)?;
-    fs::write(&proj_file, serialized)?;
-
-    println!("Added reference {} to project {}", doi, project);
+    println!("✅ Added {doi} to project {project}");
     Ok(())
 }
 
 
-pub fn export_bibtex(project: &str, doi: Option<String>, output: Option<String>,
-) -> Result<()> {
-
-    let proj_file = format!("projects/{}.json", project);
-
-    let data = fs::read_to_string(proj_file)?;
-    let refs: Vec<Reference> = serde_json::from_str(&data)?;
-
-    let entries: Vec<String> = if let Some(doi_filter) = doi {
-        refs.iter()
-            .filter(|r| r.doi.as_deref() == Some(&doi_filter))
-            .map(to_bibtex)
-            .collect()
-    } else {
-        refs.iter().map(to_bibtex).collect()
-    };
-
-    if entries.is_empty() {
-        println!("No matching reference found.");
-        return Ok(());
-    }
-
-    let content = entries.join("\n\n");
-
-    if let Some(outfile) = output {
-        fs::write(outfile, content)?;
-        println!("✅ BibTeX written.");
-    } else {
-        println!("{}", content);
-    }
-
-    Ok(())
-}
-
-fn to_bibtex(r: &Reference) -> String {
-    let key = r.authors
-        .get(0)
-        .map(|a| a.split_whitespace().last().unwrap_or("ref").to_lowercase())
-        .unwrap_or("ref".to_string());
-
-    let year = r.year.unwrap_or(0);
-
-
-    format!(
-        "@article{{{}{},\n  title = {{{}}},\n  author = {{{}}},\
-            \n  year = {{{}}},\n  doi = {{{}}},\
-            \n  journal = {{{}}},\n  volume = {{{}}},\
-            \n  number = {{{}}},\n  pages = {{{}}},\
-            \n  issn = {{{}}},\n  publisher = {{{}}}\n}}",
-        key,
-        year,
-        r.title,
-        r.authors.join(" and "),
-        year,
-        r.doi.as_deref().unwrap_or(""),
-        r.journal.as_deref().unwrap_or(""),
-        r.volume.as_deref().unwrap_or(""),
-        r.number.as_deref().unwrap_or(""),
-        r.pages.as_deref().unwrap_or(""),
-        r.issn.as_deref().unwrap_or(""),
-        r.publisher.as_deref().unwrap_or(""),
-    )
-}
+// pub fn export_bibtex(project: &str, doi: Option<String>, output: Option<String>,
+// ) -> Result<()> {
+// 
+//     let proj_file = format!("projects/{}.json", project);
+// 
+//     let data = fs::read_to_string(proj_file)?;
+//     let refs: Vec<Reference> = serde_json::from_str(&data)?;
+// 
+//     let entries: Vec<String> = if let Some(doi_filter) = doi {
+//         refs.iter()
+//             .filter(|r| r.doi.as_deref() == Some(&doi_filter))
+//             .map(to_bibtex)
+//             .collect()
+//     } else {
+//         refs.iter().map(to_bibtex).collect()
+//     };
+// 
+//     if entries.is_empty() {
+//         println!("No matching reference found.");
+//         return Ok(());
+//     }
+// 
+//     let content = entries.join("\n\n");
+// 
+//     if let Some(outfile) = output {
+//         fs::write(outfile, content)?;
+//         println!("✅ BibTeX written.");
+//     } else {
+//         println!("{}", content);
+//     }
+// 
+//     Ok(())
+// }
+// 
+// fn to_bibtex(r: &Reference) -> String {
+//     let key = r.authors
+//         .get(0)
+//         .map(|a| a.split_whitespace().last().unwrap_or("ref").to_lowercase())
+//         .unwrap_or("ref".to_string());
+// 
+//     let year = r.year.unwrap_or(0);
+// 
+// 
+//     format!(
+//         "@article{{{}{},\n  title = {{{}}},\n  author = {{{}}},\
+//             \n  year = {{{}}},\n  doi = {{{}}},\
+//             \n  journal = {{{}}},\n  volume = {{{}}},\
+//             \n  number = {{{}}},\n  pages = {{{}}},\
+//             \n  issn = {{{}}},\n  publisher = {{{}}}\n}}",
+//         key,
+//         year,
+//         r.title,
+//         r.authors.join(" and "),
+//         year,
+//         r.doi.as_deref().unwrap_or(""),
+//         r.journal.as_deref().unwrap_or(""),
+//         r.volume.as_deref().unwrap_or(""),
+//         r.number.as_deref().unwrap_or(""),
+//         r.pages.as_deref().unwrap_or(""),
+//         r.issn.as_deref().unwrap_or(""),
+//         r.publisher.as_deref().unwrap_or(""),
+//     )
+// }
