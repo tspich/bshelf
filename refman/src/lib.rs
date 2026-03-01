@@ -58,14 +58,14 @@ pub fn authors_to_string(authors: Vec<biblatex::Person>) -> String {
         .into_iter()
         .map(|p| {
             match (&p.name, &p.given_name) {
-                (g, f) => format!("{g} {f}"),
+                (g, f) => format!("- {g} {f}"),
                 // (String::new(), f) => f.clone(),
                 // (g, "") => g.clone(),
                 // ("", "") => "<unknown>".to_string(),
             }
         })
         .collect::<Vec<_>>()
-        .join(", ")
+        .join("\n")
 }
 
 pub fn publisher_string(publisher: Vec<Chunks>) -> String {
@@ -156,7 +156,7 @@ pub fn add_reference(project: &str, doi: &str) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
     let work = client
-        .work("10.1093/bioinformatics/btad696")
+        .work(doi)
         .map_err(|e| anyhow::anyhow!("crossref work error: {e:?}"))?;
 
     let title = work
