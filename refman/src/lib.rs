@@ -276,6 +276,44 @@ pub fn add_reference(project: &str, doi: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn entry_matches(entry: &biblatex::Entry, query: &str) -> bool {
+    let query = query.to_lowercase();
+
+    // -------- TITLE --------
+    let title_match = entry
+        .get("title")
+        .map(|chunks| {
+            chunks
+                .iter()
+                .map(|span| span.v.get())
+                .collect::<String>()
+        })
+        .map(|title| title.to_lowercase().contains(&query))
+        .unwrap_or(false);
+
+    if title_match {
+        return true;
+    }
+
+    // -------- AUTHORS --------
+    let author_match = entry
+        .author()
+        .ok()
+        .map(|authors| {
+            authors.iter().any(|a| {
+                // a.given_name is a String; use as_str()
+                let full_name = if a.given_name.trim().is_empty() {
+                    a.name.clone()
+                } else {
+                    format!("{} {}", a.given_name.as_str(), a.name)
+                };
+
+                full_name.to_lowercase().contains(&query)
+            })
+        })
+        .unwrap_or(false);
+    author_match
+}
 
 // pub fn export_bibtex(project: &str, doi: Option<String>, output: Option<String>,
 // ) -> Result<()> {

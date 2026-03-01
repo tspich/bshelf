@@ -13,7 +13,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{fs, io};
-use refman::{chunks_to_string, authors_to_string, date_to_year_string, publisher_string}; // <-- crate name = [package].name in Cargo.toml
+use refman::{chunks_to_string, authors_to_string, date_to_year_string, publisher_string, entry_matches}; // <-- crate name = [package].name in Cargo.toml
 
 // TODO: 
 //  - Cannot show more references than size of terminal! need scrolling
@@ -23,12 +23,14 @@ use refman::{chunks_to_string, authors_to_string, date_to_year_string, publisher
 struct App {
     projects: Vec<String>,
     selected_project: usize,
-    references: Bibliography,
+    references: Vec<Entry>,
+    // references: Bibliography,
     selected_reference: usize,
     mode: Mode,
     search_mode: bool,
     search_query: String,
-    filtered_refs: Bibliography,
+    filtered_refs: Vec<Entry>,
+    // filtered_refs: Bibliography,
     alert_message: Option<String>,
     alert_timer: Option<std::time::Instant>,
     list_state: ListState,
@@ -55,12 +57,14 @@ impl App {
         App {
             projects,
             selected_project: 0,
-            references: Bibliography::new(),
+            references: Vec::new(),
+            // references: Bibliography::new(),
             selected_reference: 0,
             mode: Mode::Normal,
             search_mode: false,
             search_query: String::new(),
-            filtered_refs: Bibliography::new(),
+            filtered_refs: Vec::new(),
+            // filtered_refs: Bibliography::new(),
             alert_message: None,
             alert_timer: None,
             list_state: ListState::default(),
@@ -72,7 +76,7 @@ impl App {
             let path = format!("projects/{}.bib", project);
             if let Ok(data) = fs::read_to_string(&path) {
                 if let Ok(refs) = Bibliography::parse(&data) {
-                    self.references = refs;
+                    self.references = refs.iter().cloned().collect();
                     self.selected_reference = 0;
                 }
             }
@@ -80,7 +84,8 @@ impl App {
     }
 
     fn clear_filtered_refs(&mut self) {
-        self.filtered_refs = Bibliography::new();
+        self.filtered_refs.clear();
+        // self.filtered_refs = Bibliography::new();
     }
 
     // fn refresh_refs(&mut self) {
@@ -93,35 +98,68 @@ impl App {
         self.search_query.clear();
     }
 
+    fn apply_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.clear_filtered_refs();
+            self.mode = Mode::Normal;
+            return;
+        }
+    
+        let query = self.search_query.clone();
+    
+        self.filtered_refs = self
+            .references
+            .iter()
+            .filter(|entry| entry_matches(entry, &query))
+            .cloned()
+            .collect();
+    
+        self.selected_reference = 0;
+        self.search_mode = false;
+        self.mode = Mode::Normal;
+    }
     // fn apply_search(&mut self) {
     //     if self.search_query.is_empty() {
-    //         self.filtered_refs.clear();
+    //         self.clear_filtered_refs();
     //         self.mode = Mode::Normal;
     //         return;
     //     }
 
+    //     let query = self.search_query.to_lowercase();
     //     self.filtered_refs = self
     //         .references
     //         .iter()
-    //         .map(|entry| {
-    //             entry
+    //         .filter(|entry|{
+    //             let title_match = entry
     //                 .get("title")
     //                 .map(|chunks| {
     //                     chunks
     //                         .iter()
-    //                         .map(|span| span.v.get().to_string())
+    //                         .map(|span| span.v.get())
     //                         .collect::<String>()
     //                 })
-    //         })
-    //         .filter(|r| {
-    //             r.to_lowercase().contains(&self.search_query.to_lowercase())
-    //                 || r
-    //                     .authors
-    //                     .iter()
-    //                     .any(|a| a.to_lowercase().contains(&self.search_query.to_lowercase()))
-    //         })
-    //         .cloned()
-    //         .collect();
+    //                 .map(|title| title.to_lowercase().contains(&query))
+    //                 .unwrap_or(false);
+
+    //             let author_match = entry
+    //                 .author()
+    //                 .ok()
+    //                 .map(|authors| {
+    //                     authors.iter().any(|a| {
+    //                         let name = format!(
+    //                             "{} {}",
+    //                             a.given.as_deref().unwrap_or(""),
+    //                             a.family.as_deref().unwrap_or("")
+    //                         );
+    //                         name.to_lowercase().contains(&query)
+    //                     })
+    //                 })
+    //                 .unwrap_or(false);
+
+    //         title_match || author_match
+    //     })
+    //     .cloned() // now still Entry
+    //     .collect();
 
     //     self.selected_reference = 0;
     //     self.search_mode = false;
@@ -142,21 +180,21 @@ impl App {
         }
     }
 
-    fn next(&mut self) {
-        let i = match self.list_state.selected() {
-            Some(i) if i + 1 < self.references.len() => i + 1,
-            _ => 0,
-        };
-        self.list_state.select(Some(i));
-    }
-    
-    fn previous(&mut self) {
-        let i = match self.list_state.selected() {
-            Some(i) if i > 0 => i - 1,
-            _ => self.references.len() - 1,
-        };
-        self.list_state.select(Some(i));
-    }
+    // fn next(&mut self) {
+    //     let i = match self.list_state.selected() {
+    //         Some(i) if i + 1 < self.references.len() => i + 1,
+    //         _ => 0,
+    //     };
+    //     self.list_state.select(Some(i));
+    // }
+    // 
+    // fn previous(&mut self) {
+    //     let i = match self.list_state.selected() {
+    //         Some(i) if i > 0 => i - 1,
+    //         _ => self.references.len() - 1,
+    //     };
+    //     self.list_state.select(Some(i));
+    // }
 }
 
 
@@ -220,7 +258,7 @@ fn main() -> anyhow::Result<()> {
             let mut entry_keys: Vec<Entry> = refs_to_show.iter().cloned().collect();
             entry_keys.sort_unstable_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
 
-            let refs_to_show = refs_to_show.into_vec();
+            // let refs_to_show = refs_to_show.into_vec();
 
             let ref_items: Vec<ListItem> = entry_keys
                 .iter()
@@ -351,7 +389,7 @@ fn main() -> anyhow::Result<()> {
                     // ⏎ Apply search OR open PDF
                     KeyCode::Enter => {
                         if app.search_mode {
-                            // app.apply_search();
+                            app.apply_search();
                         } else {
                             // Open PDF if available
                             let active_refs = if !app.filtered_refs.is_empty() {
@@ -359,7 +397,7 @@ fn main() -> anyhow::Result<()> {
                             } else {
                                 app.references.clone()
                             };
-                            let active_refs = active_refs.into_vec();
+                            // let active_refs = active_refs.into_vec();
 
                             if let Some(r) = active_refs.get(app.selected_reference) {
                                 // Try using explicit pdf path from JSON first
@@ -389,22 +427,22 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
         
-                    // // Typing during search
-                    // KeyCode::Char(c) if app.search_mode => {
-                    //     app.search_query.push(c);
-                    // }
+                    // Typing during search
+                    KeyCode::Char(c) if app.search_mode => {
+                        app.search_query.push(c);
+                    }
         
-                    // // Backspace during search
-                    // KeyCode::Backspace if app.search_mode => {
-                    //     app.search_query.pop();
-                    // }
+                    // Backspace during search
+                    KeyCode::Backspace if app.search_mode => {
+                        app.search_query.pop();
+                    }
         
-                    // // Cancel search
-                    // KeyCode::Esc => {
-                    //     app.search_mode = false;
-                    //     app.search_query.clear();
-                    //     app.filtered_refs.clear();
-                    // }
+                    // Cancel search
+                    KeyCode::Esc => {
+                        app.search_mode = false;
+                        app.search_query.clear();
+                        app.clear_filtered_refs();
+                    }
         
                     _ => {}
                 }
