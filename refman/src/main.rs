@@ -13,12 +13,14 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{fs, io};
-use refman::{chunks_to_string, authors_to_string, date_to_year_string, publisher_string, entry_matches}; // <-- crate name = [package].name in Cargo.toml
+use refman::{chunks_to_string, authors_to_string, date_to_year_string, publisher_string, entry_matches, open_editor}; // <-- crate name = [package].name in Cargo.toml
+use std::process::Command;
 
 // TODO: 
 //  - Cannot show more references than size of terminal! need scrolling
 //  - Search/filtering
 //  - sort by name, year
+//  - Edit existing citations
 
 struct App {
     projects: Vec<String>,
@@ -77,6 +79,7 @@ impl App {
             if let Ok(data) = fs::read_to_string(&path) {
                 if let Ok(refs) = Bibliography::parse(&data) {
                     self.references = refs.iter().cloned().collect();
+                    self.references.sort_by(|a, b| a.key.cmp(&b.key));
                     self.selected_reference = 0;
                 }
             }
@@ -104,67 +107,20 @@ impl App {
             self.mode = Mode::Normal;
             return;
         }
-    
+
         let query = self.search_query.clone();
-    
+
         self.filtered_refs = self
             .references
             .iter()
             .filter(|entry| entry_matches(entry, &query))
             .cloned()
             .collect();
-    
+
         self.selected_reference = 0;
         self.search_mode = false;
         self.mode = Mode::Normal;
     }
-    // fn apply_search(&mut self) {
-    //     if self.search_query.is_empty() {
-    //         self.clear_filtered_refs();
-    //         self.mode = Mode::Normal;
-    //         return;
-    //     }
-
-    //     let query = self.search_query.to_lowercase();
-    //     self.filtered_refs = self
-    //         .references
-    //         .iter()
-    //         .filter(|entry|{
-    //             let title_match = entry
-    //                 .get("title")
-    //                 .map(|chunks| {
-    //                     chunks
-    //                         .iter()
-    //                         .map(|span| span.v.get())
-    //                         .collect::<String>()
-    //                 })
-    //                 .map(|title| title.to_lowercase().contains(&query))
-    //                 .unwrap_or(false);
-
-    //             let author_match = entry
-    //                 .author()
-    //                 .ok()
-    //                 .map(|authors| {
-    //                     authors.iter().any(|a| {
-    //                         let name = format!(
-    //                             "{} {}",
-    //                             a.given.as_deref().unwrap_or(""),
-    //                             a.family.as_deref().unwrap_or("")
-    //                         );
-    //                         name.to_lowercase().contains(&query)
-    //                     })
-    //                 })
-    //                 .unwrap_or(false);
-
-    //         title_match || author_match
-    //     })
-    //     .cloned() // now still Entry
-    //     .collect();
-
-    //     self.selected_reference = 0;
-    //     self.search_mode = false;
-    //     self.mode = Mode::Normal;
-    // }
 
     fn show_alert(&mut self, msg: &str) {
         self.alert_message = Some(msg.to_string());
@@ -179,6 +135,26 @@ impl App {
             }
         }
     }
+
+    // fn find_entry_line(path: &str, key: &str) -> Option<usize> {
+    //     let content = std::fs::read_to_string(path).ok()?;
+    // 
+    //     for (i, line) in content.lines().enumerate() {
+    //         if line.contains(&format!("{{{},", key)) {
+    //             return Some(i + 1); // line numbers start at 1
+    //         }
+    //     }
+
+    //     None
+    // }
+
+    // fn open_in_nvim(path: &str, line: usize) {
+    //     let _ = Command::new("nvim")
+    //         .arg(format!("+{}", line))
+    //         .arg(path)
+    //         .spawn();
+    // }
+
 
     // fn next(&mut self) {
     //     let i = match self.list_state.selected() {
@@ -255,12 +231,12 @@ fn main() -> anyhow::Result<()> {
                 app.references.clone()
             };
 
-            let mut entry_keys: Vec<Entry> = refs_to_show.iter().cloned().collect();
-            entry_keys.sort_unstable_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
+            // let mut entry_keys: Vec<Entry> = refs_to_show.iter().cloned().collect();
+            // entry_keys.sort_unstable_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
 
             // let refs_to_show = refs_to_show.into_vec();
 
-            let ref_items: Vec<ListItem> = entry_keys
+            let ref_items: Vec<ListItem> = refs_to_show
                 .iter()
                 .enumerate()
                 .map(|(i, r)| {
@@ -273,7 +249,7 @@ fn main() -> anyhow::Result<()> {
                     ListItem::new(Span::styled(key, style))
                 })
                 .collect();
-            
+
 
             //ref_items.sort_by_key(|item| &item.author);
 
@@ -309,7 +285,6 @@ fn main() -> anyhow::Result<()> {
 
             // Bottom: search box (vchunks[1])
             let search_text = if app.search_mode {
-            //let search_text = if app.mode = Mode::Search {
                 format!("/{}", app.search_query)
             } else if !app.filtered_refs.is_empty() {
                 // show active filter
@@ -346,14 +321,31 @@ fn main() -> anyhow::Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
-        
+
+                    // Typing during search
+                    KeyCode::Char(c) if app.search_mode => {
+                        app.search_query.push(c);
+                    }
+
+                    // Backspace during search
+                    KeyCode::Backspace if app.search_mode => {
+                        app.search_query.pop();
+                    }
+
+                    // Cancel search
+                    KeyCode::Esc => {
+                        app.search_mode = false;
+                        app.search_query.clear();
+                        app.clear_filtered_refs();
+                    }
+
                     // Navigation
                     KeyCode::Up | KeyCode::Char('k') => {
                         if app.selected_reference > 0 {
                             app.selected_reference -= 1;
                         }
                     }
-        
+
                     KeyCode::Down | KeyCode::Char('j') => {
                         let active_refs = if !app.filtered_refs.is_empty() {
                             &app.filtered_refs
@@ -364,7 +356,7 @@ fn main() -> anyhow::Result<()> {
                             app.selected_reference += 1;
                         }
                     }
-        
+
                     KeyCode::Left | KeyCode::Char('h') => {
                         if app.selected_project > 0 {
                             app.selected_project -= 1;
@@ -372,7 +364,7 @@ fn main() -> anyhow::Result<()> {
                             app.clear_filtered_refs();
                         }
                     }
-        
+
                     KeyCode::Right | KeyCode::Char('l') => {
                         if app.selected_project + 1 < app.projects.len() {
                             app.selected_project += 1;
@@ -380,12 +372,44 @@ fn main() -> anyhow::Result<()> {
                             app.clear_filtered_refs();
                         }
                     }
-        
+
+                    KeyCode::Char('e') => {
+                        if let Some(project) = app.projects.get(app.selected_project) {
+                            let path = format!("projects/{}.bib", project);
+                    
+                            if let Some(entry) = app.references.get(app.selected_reference) {
+                                let key = &entry.key;
+                    
+                                if let Err(err) = open_editor(&path, key) {
+                                    app.show_alert(&format!("Editor error: {}", err));
+                                } else {
+                                    // 🔁 Reload file after editing
+                                    app.load_references();
+                                }
+                            }
+                        }
+                    }
+
+                    // KeyCode::Char('e') => {
+                    //     if let Some(project) = app.projects.get(app.selected_project) {
+                    //         let path = format!("projects/{}.bib", project);
+                    // 
+                    //         if let Some(entry) = app.references.get(app.selected_reference) {
+                    //             let key = &entry.key;
+
+                    //             let _ = std::process::Command::new("nvim")
+                    //                 .arg(format!("+/@.*{{{},", key))
+                    //                 .arg(&path)
+                    //                 .spawn();
+                    //         }
+                    //     }
+                    // }
+
                     // 🔍 Enter search mode
                     KeyCode::Char('/') => {
                         app.enter_search_mode();
                     }
-        
+
                     // ⏎ Apply search OR open PDF
                     KeyCode::Enter => {
                         if app.search_mode {
@@ -411,7 +435,7 @@ fn main() -> anyhow::Result<()> {
                                 } else {
                                     std::path::PathBuf::new()
                                 };
-                            
+
                                 if pdf_path.exists() {
                                     if let Err(err) = std::process::Command::new("xdg-open")
                                         .arg(&pdf_path)
@@ -426,24 +450,8 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
-        
-                    // Typing during search
-                    KeyCode::Char(c) if app.search_mode => {
-                        app.search_query.push(c);
-                    }
-        
-                    // Backspace during search
-                    KeyCode::Backspace if app.search_mode => {
-                        app.search_query.pop();
-                    }
-        
-                    // Cancel search
-                    KeyCode::Esc => {
-                        app.search_mode = false;
-                        app.search_query.clear();
-                        app.clear_filtered_refs();
-                    }
-        
+
+
                     _ => {}
                 }
                 app.clear_expired_alert();  

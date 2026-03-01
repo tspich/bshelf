@@ -11,6 +11,13 @@ use biblatex::{Bibliography, Chunks, DateValue};
 use biblatex::{Entry, EntryType, PermissiveType};
 use biblatex::{Chunk, Spanned};
 use crossref::Crossref;
+use crossterm::{
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use std::io;
+use std::process::Command;
+
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Reference {
@@ -314,6 +321,27 @@ pub fn entry_matches(entry: &biblatex::Entry, query: &str) -> bool {
         .unwrap_or(false);
     author_match
 }
+
+pub fn open_editor(path: &str, key: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+
+    // 1️⃣ Restore terminal before launching nvim
+    disable_raw_mode()?;
+    execute!(stdout, LeaveAlternateScreen)?;
+
+    // 2️⃣ Launch nvim and wait for it
+    Command::new("nvim")
+        .arg(format!("+/@.*{{{},", key))
+        .arg(path)
+        .status()?;   // <-- BLOCK until exit
+
+    // 3️⃣ Reinitialize TUI
+    execute!(stdout, EnterAlternateScreen)?;
+    enable_raw_mode()?;
+
+    Ok(())
+}
+
 
 // pub fn export_bibtex(project: &str, doi: Option<String>, output: Option<String>,
 // ) -> Result<()> {
