@@ -13,8 +13,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{fs, io};
-use refman::{chunks_to_string, authors_to_string, date_to_year_string, publisher_string, entry_matches, open_editor}; // <-- crate name = [package].name in Cargo.toml
-use std::process::Command;
+use refman::{chunks_to_string, authors_to_string, date_to_year_string, publisher_string, entry_matches}; // <-- crate name = [package].name in Cargo.toml
 
 // TODO: 
 //  - Cannot show more references than size of terminal! need scrolling
@@ -136,6 +135,18 @@ impl App {
         }
     }
 
+    fn suspend_tui(&self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen)?;
+        Ok(())
+    }
+
+    fn resume_tui(&self) -> io::Result<()> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(())
+    }
+
     // fn find_entry_line(path: &str, key: &str) -> Option<usize> {
     //     let content = std::fs::read_to_string(path).ok()?;
     // 
@@ -231,11 +242,6 @@ fn main() -> anyhow::Result<()> {
                 app.references.clone()
             };
 
-            // let mut entry_keys: Vec<Entry> = refs_to_show.iter().cloned().collect();
-            // entry_keys.sort_unstable_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
-
-            // let refs_to_show = refs_to_show.into_vec();
-
             let ref_items: Vec<ListItem> = refs_to_show
                 .iter()
                 .enumerate()
@@ -250,8 +256,6 @@ fn main() -> anyhow::Result<()> {
                 })
                 .collect();
 
-
-            //ref_items.sort_by_key(|item| &item.author);
 
             let ref_list = List::new(ref_items)
                 .block(Block::default().title("References").borders(Borders::ALL));
@@ -373,38 +377,6 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    KeyCode::Char('e') => {
-                        if let Some(project) = app.projects.get(app.selected_project) {
-                            let path = format!("projects/{}.bib", project);
-                    
-                            if let Some(entry) = app.references.get(app.selected_reference) {
-                                let key = &entry.key;
-                    
-                                if let Err(err) = open_editor(&path, key) {
-                                    app.show_alert(&format!("Editor error: {}", err));
-                                } else {
-                                    // 🔁 Reload file after editing
-                                    app.load_references();
-                                }
-                            }
-                        }
-                    }
-
-                    // KeyCode::Char('e') => {
-                    //     if let Some(project) = app.projects.get(app.selected_project) {
-                    //         let path = format!("projects/{}.bib", project);
-                    // 
-                    //         if let Some(entry) = app.references.get(app.selected_reference) {
-                    //             let key = &entry.key;
-
-                    //             let _ = std::process::Command::new("nvim")
-                    //                 .arg(format!("+/@.*{{{},", key))
-                    //                 .arg(&path)
-                    //                 .spawn();
-                    //         }
-                    //     }
-                    // }
-
                     // 🔍 Enter search mode
                     KeyCode::Char('/') => {
                         app.enter_search_mode();
@@ -451,6 +423,35 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
+                    KeyCode::Char('e') => {
+                        if let Some(project) = app.projects.get(app.selected_project) {
+                            let path = format!("projects/{}.bib", project);
+
+                            if let Some(entry) = app.references.get(app.selected_reference) {
+                                let key = &entry.key;
+
+                                app.suspend_tui().ok();
+                                let editor = std::env::var("EDITOR").unwrap_or("nvim".into());
+
+                                let _ = std::process::Command::new(editor)
+                                    .arg(format!("+/@.*{{{},", key))
+                                    .arg(&path)
+                                    .status();   // BLOCK
+
+                                app.resume_tui().ok();
+
+                                terminal.clear().ok();
+                                app.load_references();
+
+                                // if let Err(err) = open_editor(&path, key) {
+                                //     app.show_alert(&format!("Editor error: {}", err));
+                                // } else {
+                                //     // 🔁 Reload file after editing
+                                //     app.load_references();
+                                // }
+                            }
+                        }
+                    }
 
                     _ => {}
                 }
