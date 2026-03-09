@@ -272,7 +272,7 @@ fn main() -> anyhow::Result<()> {
                     r.author().ok().map(authors_to_string).unwrap_or_else(|| "no authors".to_string()),
                     r.date().ok().and_then(date_to_year_string).unwrap_or_else(|| "<no year>".to_string()),
                     r.journal().ok().map(chunks_to_string).unwrap_or_else(|| "<no jounal>".to_string()),
-                    r.doi().ok().as_deref().unwrap_or(""),
+                    r.url().ok().as_deref().unwrap_or(""),
                     r.publisher().ok().map(publisher_string).unwrap_or_else(|| "<no issn>".to_string()),
                     r.abstract_().ok().map(chunks_to_string).unwrap_or_else(|| "<no abstract>".to_string()),
                 )
