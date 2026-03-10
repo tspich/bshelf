@@ -13,13 +13,15 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{fs, io};
-use refman::{chunks_to_string, authors_to_string, date_to_year_string, publisher_string, entry_matches}; // <-- crate name = [package].name in Cargo.toml
+use std::path::Path;
+
+use refman::{new_project, chunks_to_string, authors_to_string, date_to_year_string, publisher_string, entry_matches, add_reference}; // <-- crate name = [package].name in Cargo.toml
 
 // TODO: 
 //  - Cannot show more references than size of terminal! need scrolling
 //  - Search/filtering
-//  - sort by name, year
-//  - Edit existing citations
+//  - Creating a new project should check if project already exists.
+//
 
 struct App {
     projects: Vec<String>,
@@ -30,6 +32,8 @@ struct App {
     mode: Mode,
     search_mode: bool,
     search_query: String,
+    new_project_name: String,
+    new_ref: String,
     filtered_refs: Vec<Entry>,
     // filtered_refs: Bibliography,
     alert_message: Option<String>,
@@ -40,9 +44,8 @@ struct App {
 enum Mode {
     Normal,
     Search,
-    //Adding,
-    //Editing,
-    //Deleting,
+    NewProject,
+    Adding,
 }
 
 impl App {
@@ -64,8 +67,10 @@ impl App {
             mode: Mode::Normal,
             search_mode: false,
             search_query: String::new(),
+            new_project_name: String::new(),
+            new_ref: String::new(),
             filtered_refs: Vec::new(),
-            // filtered_refs: Bibliography::new(),
+           // filtered_refs: Bibliography::new(),
             alert_message: None,
             alert_timer: None,
             list_state: ListState::default(),
@@ -147,44 +152,7 @@ impl App {
         Ok(())
     }
 
-    // fn find_entry_line(path: &str, key: &str) -> Option<usize> {
-    //     let content = std::fs::read_to_string(path).ok()?;
-    // 
-    //     for (i, line) in content.lines().enumerate() {
-    //         if line.contains(&format!("{{{},", key)) {
-    //             return Some(i + 1); // line numbers start at 1
-    //         }
-    //     }
-
-    //     None
-    // }
-
-    // fn open_in_nvim(path: &str, line: usize) {
-    //     let _ = Command::new("nvim")
-    //         .arg(format!("+{}", line))
-    //         .arg(path)
-    //         .spawn();
-    // }
-
-
-    // fn next(&mut self) {
-    //     let i = match self.list_state.selected() {
-    //         Some(i) if i + 1 < self.references.len() => i + 1,
-    //         _ => 0,
-    //     };
-    //     self.list_state.select(Some(i));
-    // }
-    // 
-    // fn previous(&mut self) {
-    //     let i = match self.list_state.selected() {
-    //         Some(i) if i > 0 => i - 1,
-    //         _ => self.references.len() - 1,
-    //     };
-    //     self.list_state.select(Some(i));
-    // }
 }
-
-
 
 fn main() -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -319,6 +287,51 @@ fn main() -> anyhow::Result<()> {
                 f.render_widget(paragraph, area);
             }
 
+            if matches!(app.mode, Mode::NewProject) {
+                let size = f.size();
+            
+                let area = Rect {
+                    x: size.width / 4,
+                    y: size.height / 2 - 2,
+                    width: size.width / 2,
+                    height: 3,
+                };
+            
+                f.render_widget(Clear, area);
+            
+                let input = Paragraph::new(app.new_project_name.as_str())
+                    .block(
+                        Block::default()
+                            .title("New Project Name")
+                            .borders(Borders::ALL),
+                    );
+            
+                f.render_widget(input, area);
+            }
+
+            if matches!(app.mode, Mode::Adding) {
+                let size = f.size();
+            
+                let area = Rect {
+                    x: size.width / 4,
+                    y: size.height / 2 - 2,
+                    width: size.width / 2,
+                    height: 3,
+                };
+            
+                f.render_widget(Clear, area);
+            
+                let input = Paragraph::new(app.new_ref.as_str())
+                    .block(
+                        Block::default()
+                            .title("New reference DOI")
+                            .borders(Borders::ALL),
+                    );
+            
+                f.render_widget(input, area);
+            }
+
+
         })?;
 
         if crossterm::event::poll(std::time::Duration::from_millis(200))? {
@@ -337,12 +350,62 @@ fn main() -> anyhow::Result<()> {
                     }
 
                     // Cancel search
-                    KeyCode::Esc => {
+                    KeyCode::Esc if matches!(app.mode, Mode::Search) => {
                         app.search_mode = false;
                         app.search_query.clear();
                         app.clear_filtered_refs();
                     }
 
+                    KeyCode::Char(c) if matches!(app.mode, Mode::NewProject) => {
+                        app.new_project_name.push(c);
+                    }
+                    
+                    KeyCode::Backspace if matches!(app.mode, Mode::NewProject) => {
+                        app.new_project_name.pop();
+                    }
+                    
+                    KeyCode::Esc if matches!(app.mode, Mode::NewProject) => {
+                        app.mode = Mode::Normal;
+                    }
+
+                    KeyCode::Char(c) if matches!(app.mode, Mode::Adding) => {
+                        app.new_ref.push(c);
+                    }
+                    
+                    KeyCode::Backspace if matches!(app.mode, Mode::Adding) => {
+                        app.new_ref.pop();
+                    }
+
+                    KeyCode::Esc if matches!(app.mode, Mode::Adding) => {
+                        app.mode = Mode::Normal;
+                    }
+
+                    KeyCode::Enter if matches!(app.mode, Mode::NewProject) => {
+                        if !app.new_project_name.is_empty() {
+                            if !Path::new(&format!("{}.bib", app.new_project_name)).exists() {
+                                new_project(&app.new_project_name);  // you already import this
+                                app.projects.push(app.new_project_name.clone());
+                                app.selected_project = app.projects.len() - 1;
+                                app.load_references();
+                                app.show_alert(&format!("Created new project: {}", app.new_project_name));
+                            } else {
+                                app.show_alert(&format!("project {} already exists!", app.new_project_name));
+                            }
+                        }
+                    
+                        app.mode = Mode::Normal;
+                    }
+
+                    KeyCode::Enter if matches!(app.mode, Mode::Adding) => {
+                        if !app.new_ref.is_empty() {
+                                add_reference(&app.projects[app.selected_project], &app.new_ref);  // you already import this
+                                app.load_references();
+                        }
+                    
+                        app.mode = Mode::Normal;
+                    }
+
+                    
                     // Navigation
                     KeyCode::Up | KeyCode::Char('k') => {
                         if app.selected_reference > 0 {
@@ -443,14 +506,17 @@ fn main() -> anyhow::Result<()> {
                                 terminal.clear().ok();
                                 app.load_references();
 
-                                // if let Err(err) = open_editor(&path, key) {
-                                //     app.show_alert(&format!("Editor error: {}", err));
-                                // } else {
-                                //     // 🔁 Reload file after editing
-                                //     app.load_references();
-                                // }
                             }
                         }
+                    }
+
+                    KeyCode::Char('N') => {
+                        app.mode = Mode::NewProject;
+                        app.new_project_name.clear();
+                    }
+
+                    KeyCode::Char('A') => {
+                        app.mode = Mode::Adding;
                     }
 
                     _ => {}

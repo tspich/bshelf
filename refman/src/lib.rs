@@ -36,16 +36,16 @@ pub struct Reference {
     //pub pdf: Option<String>,  // relative path to pdf if available
 }
 
-/// Create a new project JSON file (empty list).
+/// Create a new project bib file (empty list).
 pub fn new_project(project: &str) -> Result<()> {
     fs::create_dir_all("projects")?;
     let proj_file = format!("projects/{}.bib", project);
     if !Path::new(&proj_file).exists() {
-        fs::write(&proj_file, "[]")?;
-        println!("Created new project: {}", project);
-    } else {
-        println!("Project {} already exists", project);
-    }
+        fs::write(&proj_file, "")?;
+        //println!("Created new project: {}", project);
+    }// else {
+        //println!("Project {} already exists", project);
+    //}
     Ok(())
 }
 
@@ -217,18 +217,18 @@ pub fn add_reference(project: &str, doi: &str) -> Result<()> {
 
     // 4. Citation key
     let key = format!(
-        "{}{}{}",
+        "{}_{}",
         authors
             .get(0)
             .and_then(|a| a.split_whitespace().last())
             .unwrap_or("ref")
             .to_lowercase(),
         year,
-        title
-            .split_whitespace()
-            .next()
-            .unwrap_or("ref")
-            .to_lowercase(),
+        //title
+        //    .split_whitespace()
+        //    .next()
+        //    .unwrap_or("ref")
+        //    .to_lowercase(),
     );
 
 
@@ -279,7 +279,7 @@ pub fn add_reference(project: &str, doi: &str) -> Result<()> {
     //save_bib(&proj_file, &bib)?;
     fs::write(&proj_file, bib.to_bibtex_string())?;
 
-    println!("✅ Added {doi} to project {project}");
+    //println!("✅ Added {doi} to project {project}");
     Ok(())
 }
 
