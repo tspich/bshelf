@@ -14,8 +14,18 @@ use crossterm::{
 };
 use std::{fs, io};
 use std::path::Path;
+use anyhow::Result;
 
-use refman::{new_project, chunks_to_string, authors_to_string, date_to_year_string, publisher_string, entry_matches, add_reference}; // <-- crate name = [package].name in Cargo.toml
+use refman::{
+    chunks_to_string,
+    authors_to_string,
+    date_to_year_string,
+    publisher_string,
+    entry_matches,
+    add_reference,
+    Config,
+    load_config
+}; // <-- crate name = [package].name in Cargo.toml
 
 // TODO: 
 //  - Cannot show more references than size of terminal! need scrolling
@@ -25,6 +35,7 @@ use refman::{new_project, chunks_to_string, authors_to_string, date_to_year_stri
 //
 
 struct App {
+    config: Config,
     projects: Vec<String>,
     selected_project: usize,
     references: Vec<Entry>,
@@ -50,9 +61,10 @@ enum Mode {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(config: Config) -> Self {
         let mut projects = vec![];
-        if let Ok(entries) = fs::read_dir("projects") {
+
+        if let Ok(entries) = fs::read_dir(&config.projects_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.path().file_stem() {
                     projects.push(name.to_string_lossy().to_string());
@@ -60,6 +72,7 @@ impl App {
             }
         }
         App {
+            config,
             projects,
             selected_project: 0,
             references: Vec::new(),
@@ -80,7 +93,7 @@ impl App {
 
     fn load_references(&mut self) {
         if let Some(project) = self.projects.get(self.selected_project) {
-            let path = format!("projects/{}.bib", project);
+            let path = format!("{}/{}.bib", self.config.projects_dir.display(), project);
             if let Ok(data) = fs::read_to_string(&path) {
                 if let Ok(refs) = Bibliography::parse(&data) {
                     self.references = refs.iter().cloned().collect();
@@ -95,10 +108,6 @@ impl App {
         self.filtered_refs.clear();
         // self.filtered_refs = Bibliography::new();
     }
-
-    // fn refresh_refs(&mut self) {
-    //     self.load_references();
-    // }
 
     fn enter_search_mode(&mut self) {
         self.mode = Mode::Search;
@@ -153,6 +162,16 @@ impl App {
         Ok(())
     }
 
+    /// Create a new project bib file (empty list).
+    fn new_project(&self, project: &str) -> Result<()> {
+        fs::create_dir_all(&self.config.projects_dir)?;
+        let proj_file = format!("{}/{}.bib", self.config.projects_dir.display(), project);
+        if !Path::new(&proj_file).exists() {
+            fs::write(&proj_file, "")?;
+        }
+        Ok(())
+    }
+
 }
 
 fn main() -> anyhow::Result<()> {
@@ -162,7 +181,9 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let config = load_config();
+
+    let mut app = App::new(config);
     app.load_references();
 
     loop {
@@ -338,7 +359,7 @@ fn main() -> anyhow::Result<()> {
         if crossterm::event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') if matches!(app.mode, Mode::Normal) => break,
 
                     // Typing during search
                     KeyCode::Char(c) if app.search_mode => {
@@ -383,8 +404,8 @@ fn main() -> anyhow::Result<()> {
 
                     KeyCode::Enter if matches!(app.mode, Mode::NewProject) => {
                         if !app.new_project_name.is_empty() {
-                            if !Path::new(&format!("{}.bib", app.new_project_name)).exists() {
-                                new_project(&app.new_project_name);  // you already import this
+                            if !Path::new(&format!("{}/{}.bib", app.config.projects_dir.display(), app.new_project_name)).exists() {
+                                let _ = app.new_project(&app.new_project_name);  // you already import this
                                 app.projects.push(app.new_project_name.clone());
                                 app.selected_project = app.projects.len() - 1;
                                 app.load_references();
@@ -399,8 +420,12 @@ fn main() -> anyhow::Result<()> {
 
                     KeyCode::Enter if matches!(app.mode, Mode::Adding) => {
                         if !app.new_ref.is_empty() {
-                                add_reference(&app.projects[app.selected_project], &app.new_ref);  // you already import this
-                                app.load_references();
+                            let proj_file = format!("{}/{}.bib", app.config.projects_dir.display(), &app.projects[app.selected_project]);
+
+                            let _ = add_reference(&proj_file, &app.new_ref);  // you already import this
+
+                            // let _ = add_reference(&app.projects[app.selected_project], &app.new_ref);  // you already import this
+                            app.load_references();
                         }
                     
                         app.mode = Mode::Normal;
@@ -489,7 +514,7 @@ fn main() -> anyhow::Result<()> {
 
                     KeyCode::Char('e') => {
                         if let Some(project) = app.projects.get(app.selected_project) {
-                            let path = format!("projects/{}.bib", project);
+                            let path = format!("{}/{}.bib", app.config.projects_dir.display(), project);
 
                             if let Some(entry) = app.references.get(app.selected_reference) {
                                 let key = &entry.key;
@@ -518,6 +543,7 @@ fn main() -> anyhow::Result<()> {
 
                     KeyCode::Char('A') => {
                         app.mode = Mode::Adding;
+                        app.new_ref.clear();
                     }
 
                     _ => {}
