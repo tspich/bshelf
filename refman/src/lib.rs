@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 use anyhow::Result;
 // use std::fmt::format;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ops::Range;
 use reqwest::blocking;
 use serde_json::Value;
@@ -36,22 +36,15 @@ pub struct Reference {
     //pub pdf: Option<String>,  // relative path to pdf if available
 }
 
-/// Create a new project bib file (empty list).
-pub fn new_project(project: &str) -> Result<()> {
-    fs::create_dir_all("projects")?;
-    let proj_file = format!("projects/{}.bib", project);
-    if !Path::new(&proj_file).exists() {
-        fs::write(&proj_file, "")?;
-        //println!("Created new project: {}", project);
-    }// else {
-        //println!("Project {} already exists", project);
-    //}
-    Ok(())
+fn field<S: AsRef<str>>(s: S) -> Vec<Spanned<Chunk>> {
+    vec![Spanned::detached(Chunk::Normal(s.as_ref().to_string()))]
 }
 
-fn field<S: AsRef<str>>(s: S) -> Vec<Spanned<Chunk>> {
-    vec![Spanned::detached(Chunk::Verbatim(s.as_ref().to_string()))]
-}
+// Produce double braces {{...}} can be helpeful in some context like title?
+// fn field<S: AsRef<str>>(s: S) -> Vec<Spanned<Chunk>> {
+//     vec![Spanned::detached(Chunk::Verbatim(s.as_ref().to_string()))]
+// }
+
 
 pub fn chunks_to_string(chunks: &[Spanned<Chunk>]) -> String {
     chunks
@@ -131,9 +124,10 @@ pub fn pages_string(
     }
 }
 
-pub fn add_reference(project: &str, doi: &str) -> Result<()> {
-    let proj_file = Path::new("projects").join(format!("{project}.bib"));
-    fs::create_dir_all("projects")?;
+pub fn add_reference(proj_file: &str, doi: &str) -> Result<()> {
+    // let proj_file = Path::new("projects").join(format!("{project}.bib"));
+
+    // fs::create_dir_all("projects")?;
 
 
     // 1. Load bibliography
@@ -277,7 +271,8 @@ pub fn add_reference(project: &str, doi: &str) -> Result<()> {
     // 7. Add + save
     bib.insert(entry);
     //save_bib(&proj_file, &bib)?;
-    fs::write(&proj_file, bib.to_bibtex_string())?;
+    // fs::write(&proj_file, bib.to_bibtex_string())?;
+    fs::write(&proj_file, bib.to_biblatex_string())?;
 
     //println!("✅ Added {doi} to project {project}");
     Ok(())
@@ -341,3 +336,25 @@ pub fn open_editor(path: &str, key: &str) -> io::Result<()> {
 
     Ok(())
 }
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub projects_dir: PathBuf,
+    pub pdfs_dir: PathBuf,
+}
+
+
+pub fn load_config() -> Config {
+    let config_dir = dirs::config_dir()
+        .expect("Could not find config directory")
+        .join("refman");
+
+    let config_path = config_dir.join("config.toml");
+
+    let contents = fs::read_to_string(&config_path)
+        .expect("Could not read config file");
+
+    toml::from_str(&contents)
+        .expect("Invalid config file")
+}
+
