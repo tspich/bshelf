@@ -21,6 +21,7 @@ use refman::{new_project, chunks_to_string, authors_to_string, date_to_year_stri
 //  - Cannot show more references than size of terminal! need scrolling
 //  - Search/filtering
 //  - Creating a new project should check if project already exists.
+//  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
 //
 
 struct App {
