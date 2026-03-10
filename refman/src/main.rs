@@ -1,46 +1,557 @@
-use clap::{Parser, Subcommand};
+use biblatex::{Bibliography, Entry};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Rect, Alignment},
+    style::{Color, Modifier, Style},
+    text::Span,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear, Wrap},
+    Terminal,
+};
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use std::{fs, io};
+use std::path::Path;
 use anyhow::Result;
-use refman::{new_project, add_reference, export_bibtex}; // <-- crate name = [package].name in Cargo.toml
 
-#[derive(Parser)]
-#[command(name = "refman", version, about = "Minimal reference manager")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
+use refman::{
+    chunks_to_string,
+    authors_to_string,
+    date_to_year_string,
+    publisher_string,
+    entry_matches,
+    add_reference,
+    Config,
+    load_config
+}; // <-- crate name = [package].name in Cargo.toml
+
+// TODO: 
+//  - Cannot show more references than size of terminal! need scrolling
+//  - Search/filtering
+//  - Creating a new project should check if project already exists.
+//  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
+//
+
+struct App {
+    config: Config,
+    projects: Vec<String>,
+    selected_project: usize,
+    references: Vec<Entry>,
+    selected_reference: usize,
+    mode: Mode,
+    search_mode: bool,
+    search_query: String,
+    new_project_name: String,
+    new_ref: String,
+    filtered_refs: Vec<Entry>,
+    alert_message: Option<String>,
+    alert_timer: Option<std::time::Instant>,
+    list_state: ListState,
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Create a new project (empty .json)
-    New { project: String },
-    /// Add a reference by DOI
-    Add { project: String, doi: String },
-    Bibtex { 
-        project: String,
-        #[arg(short, long)]
-        doi: Option<String>,
-        #[arg(short, long)]
-        output: Option<String>,
-    },
+enum Mode {
+    Normal,
+    Search,
+    NewProject,
+    Adding,
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+impl App {
+    fn new(config: Config) -> Self {
+        let mut projects = vec![];
 
-    match cli.command {
-        Commands::New { project } => {
-            new_project(&project)?;
+        if let Ok(entries) = fs::read_dir(&config.projects_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.path().file_stem() {
+                    projects.push(name.to_string_lossy().to_string());
+                }
+            }
         }
-        Commands::Add { project, doi } => {
-            add_reference(&project, &doi)?;
-        }
-        //Commands::List => {
-        // refman::list_references(&project_file)?;
-        //}
-        Commands::Bibtex { project, doi, output } => {
-            export_bibtex(&project, doi, output)?;
+        App {
+            config,
+            projects,
+            selected_project: 0,
+            references: Vec::new(),
+            selected_reference: 0,
+            mode: Mode::Normal,
+            search_mode: false,
+            search_query: String::new(),
+            new_project_name: String::new(),
+            new_ref: String::new(),
+            filtered_refs: Vec::new(),
+            alert_message: None,
+            alert_timer: None,
+            list_state: ListState::default(),
         }
     }
+
+    fn load_references(&mut self) {
+        if let Some(project) = self.projects.get(self.selected_project) {
+            let path = format!("{}/{}.bib", self.config.projects_dir.display(), project);
+            if let Ok(data) = fs::read_to_string(&path) {
+                if let Ok(refs) = Bibliography::parse(&data) {
+                    self.references = refs.iter().cloned().collect();
+                    self.references.sort_by(|a, b| a.key.cmp(&b.key));
+                    self.selected_reference = 0;
+                }
+            }
+        }
+    }
+
+    fn clear_filtered_refs(&mut self) {
+        self.filtered_refs.clear();
+    }
+
+    fn enter_search_mode(&mut self) {
+        self.mode = Mode::Search;
+        self.search_mode = true;
+        self.search_query.clear();
+    }
+
+    fn apply_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.clear_filtered_refs();
+            self.mode = Mode::Normal;
+            return;
+        }
+
+        let query = self.search_query.clone();
+
+        self.filtered_refs = self
+            .references
+            .iter()
+            .filter(|entry| entry_matches(entry, &query))
+            .cloned()
+            .collect();
+
+        self.selected_reference = 0;
+        self.search_mode = false;
+        self.mode = Mode::Normal;
+    }
+
+    fn show_alert(&mut self, msg: &str) {
+        self.alert_message = Some(msg.to_string());
+        self.alert_timer = Some(std::time::Instant::now());
+    }
+
+    fn clear_expired_alert(&mut self) {
+        if let Some(start) = self.alert_timer {
+            if start.elapsed().as_secs() > 3 {
+                self.alert_message = None;
+                self.alert_timer = None;
+            }
+        }
+    }
+
+    fn suspend_tui(&self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen)?;
+        Ok(())
+    }
+
+    fn resume_tui(&self) -> io::Result<()> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(())
+    }
+
+    /// Create a new project bib file (empty list).
+    fn new_project(&self, project: &str) -> Result<()> {
+        fs::create_dir_all(&self.config.projects_dir)?;
+        let proj_file = format!("{}/{}.bib", self.config.projects_dir.display(), project);
+        if !Path::new(&proj_file).exists() {
+            fs::write(&proj_file, "")?;
+        }
+        Ok(())
+    }
+
+}
+
+fn main() -> anyhow::Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let config = load_config();
+
+    let mut app = App::new(config);
+    app.load_references();
+
+    loop {
+        // --- draw UI ---
+        terminal.draw(|f| {
+            // make vertical layout: top = the three panels, bottom = search box (length 3)
+            let vchunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+                .split(f.size());
+
+            // top row: three panels
+            let panels = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(20),
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(40),
+                ])
+                .split(vchunks[0]);
+
+            // Left panel: projects
+            let project_items: Vec<ListItem> = app
+                .projects
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let style = if i == app.selected_project {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Span::styled(p, style))
+                })
+                .collect();
+            let project_list = List::new(project_items)
+                .block(Block::default().title("Projects").borders(Borders::ALL));
+            f.render_widget(project_list, panels[0]);
+
+            // Middle panel: references - choose filtered list if present
+
+            // let refs_to_show = app.references.clone();
+            let refs_to_show = if !app.filtered_refs.is_empty() {
+                app.filtered_refs.clone()
+            } else {
+                app.references.clone()
+            };
+
+            let ref_items: Vec<ListItem> = refs_to_show
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let key = r.key.to_string();
+                    let style = if i == app.selected_reference {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Span::styled(key, style))
+                })
+                .collect();
+
+
+            let ref_list = List::new(ref_items)
+                .block(Block::default().title("References").borders(Borders::ALL));
+            // f.render_widget(ref_list, panels[1]);
+            f.render_stateful_widget(ref_list, panels[1], &mut app.list_state);
+
+            // Right panel: details - use refs_to_show and check bounds
+            let details = if !refs_to_show.is_empty() && app.selected_reference < refs_to_show.len() {
+                let r = &refs_to_show[app.selected_reference];
+                format!(
+                    "Title:\n{}\nAuthors:\n{}\nYear: {}\nJournal: {}\nDOI: {}\nPublisher: {}\nAbstract:\n {}",
+                    //"Title:\n{}\n\nAuthors:\n{}\n\nYear:\t{}\nJournal:\t{}\nDOI:\t{}\nPublisher:\t{}\nAbstract:\n {}",
+                    r.title().ok().map(chunks_to_string).unwrap_or_else(|| "<no title>".to_string()),
+                    r.author().ok().map(authors_to_string).unwrap_or_else(|| "no authors".to_string()),
+                    r.date().ok().and_then(date_to_year_string).unwrap_or_else(|| "<no year>".to_string()),
+                    r.journal().ok().map(chunks_to_string).unwrap_or_else(|| "<no jounal>".to_string()),
+                    r.url().ok().as_deref().unwrap_or(""),
+                    r.publisher().ok().map(publisher_string).unwrap_or_else(|| "<no issn>".to_string()),
+                    r.abstract_().ok().map(chunks_to_string).unwrap_or_else(|| "<no abstract>".to_string()),
+                )
+            } else {
+                "No reference selected.".to_string()
+            };
+
+            f.render_widget(Clear, Block::default().borders(Borders::ALL).inner(panels[2]));
+
+            let ref_para = Paragraph::new(details)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().title("Details").borders(Borders::ALL));
+            f.render_widget(ref_para, panels[2]);
+
+            // Bottom: search box (vchunks[1])
+            let search_text = if app.search_mode {
+                format!("/{}", app.search_query)
+            } else if !app.filtered_refs.is_empty() {
+                // show active filter
+                format!("Filter: {}", app.search_query)
+            } else {
+                String::from("Press / to search")
+            };
+            let search_para = Paragraph::new(search_text)
+                .block(Block::default().title("Search").borders(Borders::ALL));
+            f.render_widget(search_para, vchunks[1]);
+
+            if let Some(msg) = &app.alert_message {
+                let size = f.size();
+                let alert_height = 3;
+                let alert_width = msg.len() as u16 + 4; // padding
+                let x = (size.width.saturating_sub(alert_width)) / 2;
+                let y = size.height.saturating_sub(alert_height) - 1;
+
+                let area = Rect { x, y, width: alert_width, height: alert_height };
+
+                let paragraph = Paragraph::new(Span::styled(
+                    msg,
+                    Style::default().fg(Color::White).bg(Color::Red),
+                ))
+                .block(Block::default().borders(Borders::ALL))
+                .alignment(Alignment::Center);
+
+                f.render_widget(paragraph, area);
+            }
+
+            if matches!(app.mode, Mode::NewProject) {
+                let size = f.size();
+            
+                let area = Rect {
+                    x: size.width / 4,
+                    y: size.height / 2 - 2,
+                    width: size.width / 2,
+                    height: 3,
+                };
+            
+                f.render_widget(Clear, area);
+            
+                let input = Paragraph::new(app.new_project_name.as_str())
+                    .block(
+                        Block::default()
+                            .title("New Project Name")
+                            .borders(Borders::ALL),
+                    );
+            
+                f.render_widget(input, area);
+            }
+
+            if matches!(app.mode, Mode::Adding) {
+                let size = f.size();
+            
+                let area = Rect {
+                    x: size.width / 4,
+                    y: size.height / 2 - 2,
+                    width: size.width / 2,
+                    height: 3,
+                };
+            
+                f.render_widget(Clear, area);
+            
+                let input = Paragraph::new(app.new_ref.as_str())
+                    .block(
+                        Block::default()
+                            .title("New reference DOI")
+                            .borders(Borders::ALL),
+                    );
+            
+                f.render_widget(input, area);
+            }
+
+
+        })?;
+
+        if crossterm::event::poll(std::time::Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') if matches!(app.mode, Mode::Normal) => break,
+
+                    // Typing during search
+                    KeyCode::Char(c) if app.search_mode => {
+                        app.search_query.push(c);
+                    }
+
+                    // Backspace during search
+                    KeyCode::Backspace if app.search_mode => {
+                        app.search_query.pop();
+                    }
+
+                    // Cancel search
+                    KeyCode::Esc if matches!(app.mode, Mode::Search) => {
+                        app.search_mode = false;
+                        app.search_query.clear();
+                        app.clear_filtered_refs();
+                    }
+
+                    KeyCode::Char(c) if matches!(app.mode, Mode::NewProject) => {
+                        app.new_project_name.push(c);
+                    }
+                    
+                    KeyCode::Backspace if matches!(app.mode, Mode::NewProject) => {
+                        app.new_project_name.pop();
+                    }
+                    
+                    KeyCode::Esc if matches!(app.mode, Mode::NewProject) => {
+                        app.mode = Mode::Normal;
+                    }
+
+                    KeyCode::Char(c) if matches!(app.mode, Mode::Adding) => {
+                        app.new_ref.push(c);
+                    }
+                    
+                    KeyCode::Backspace if matches!(app.mode, Mode::Adding) => {
+                        app.new_ref.pop();
+                    }
+
+                    KeyCode::Esc if matches!(app.mode, Mode::Adding) => {
+                        app.mode = Mode::Normal;
+                    }
+
+                    KeyCode::Enter if matches!(app.mode, Mode::NewProject) => {
+                        if !app.new_project_name.is_empty() {
+                            if !Path::new(&format!("{}/{}.bib", app.config.projects_dir.display(), app.new_project_name)).exists() {
+                                let _ = app.new_project(&app.new_project_name);  // you already import this
+                                app.projects.push(app.new_project_name.clone());
+                                app.selected_project = app.projects.len() - 1;
+                                app.load_references();
+                                app.show_alert(&format!("Created new project: {}", app.new_project_name));
+                            } else {
+                                app.show_alert(&format!("project {} already exists!", app.new_project_name));
+                            }
+                        }
+                    
+                        app.mode = Mode::Normal;
+                    }
+
+                    KeyCode::Enter if matches!(app.mode, Mode::Adding) => {
+                        if !app.new_ref.is_empty() {
+                            let proj_file = format!("{}/{}.bib", app.config.projects_dir.display(), &app.projects[app.selected_project]);
+
+                            let _ = add_reference(&proj_file, &app.new_ref);  // you already import this
+
+                            // let _ = add_reference(&app.projects[app.selected_project], &app.new_ref);  // you already import this
+                            app.load_references();
+                        }
+                    
+                        app.mode = Mode::Normal;
+                    }
+
+                    
+                    // Navigation
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if app.selected_reference > 0 {
+                            app.selected_reference -= 1;
+                        }
+                    }
+
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let active_refs = if !app.filtered_refs.is_empty() {
+                            &app.filtered_refs
+                        } else {
+                            &app.references
+                        };
+                        if app.selected_reference + 1 < active_refs.len() {
+                            app.selected_reference += 1;
+                        }
+                    }
+
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        if app.selected_project > 0 {
+                            app.selected_project -= 1;
+                            app.load_references();
+                            app.clear_filtered_refs();
+                        }
+                    }
+
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        if app.selected_project + 1 < app.projects.len() {
+                            app.selected_project += 1;
+                            app.load_references();
+                            app.clear_filtered_refs();
+                        }
+                    }
+
+                    // 🔍 Enter search mode
+                    KeyCode::Char('/') => {
+                        app.enter_search_mode();
+                    }
+
+                    // ⏎ Apply search OR open PDF
+                    KeyCode::Enter => {
+                        if app.search_mode {
+                            app.apply_search();
+                        } else {
+                            // Open PDF if available
+                            let active_refs = if !app.filtered_refs.is_empty() {
+                                app.filtered_refs.clone()
+                            } else {
+                                app.references.clone()
+                            };
+                            // let active_refs = active_refs.into_vec();
+
+                            if let Some(r) = active_refs.get(app.selected_reference) {
+                                // Try using explicit pdf path from JSON first
+                                // let pdf_path = if let Some(p) = &r.pdf {
+                                //     std::path::PathBuf::from(p)
+                                // } else
+                                let pdf_path = if let doi = &r.doi().ok() {
+                                    // Sanitize DOI for filenames (replace '/' with '-')
+                                    let safe_name = doi.as_deref().unwrap_or("").replace('/', "-");
+                                    std::path::Path::new("pdfs").join(format!("{safe_name}.pdf"))
+                                } else {
+                                    std::path::PathBuf::new()
+                                };
+
+                                if pdf_path.exists() {
+                                    if let Err(err) = std::process::Command::new("xdg-open")
+                                        .arg(&pdf_path)
+                                        .spawn()
+                                    {
+                                        eprintln!("Failed to open PDF: {}", err);
+                                    }
+                                } else {
+                                    //eprintln!("PDF not found: {}", pdf_path.display());
+                                    app.show_alert(&format!("PDF not found: {}", pdf_path.display()));
+                                }
+                            }
+                        }
+                    }
+
+                    KeyCode::Char('e') => {
+                        if let Some(project) = app.projects.get(app.selected_project) {
+                            let path = format!("{}/{}.bib", app.config.projects_dir.display(), project);
+
+                            if let Some(entry) = app.references.get(app.selected_reference) {
+                                let key = &entry.key;
+
+                                app.suspend_tui().ok();
+                                let editor = std::env::var("EDITOR").unwrap_or("nvim".into());
+
+                                let _ = std::process::Command::new(editor)
+                                    .arg(format!("+/@.*{{{},", key))
+                                    .arg(&path)
+                                    .status();   // BLOCK
+
+                                app.resume_tui().ok();
+
+                                terminal.clear().ok();
+                                app.load_references();
+
+                            }
+                        }
+                    }
+
+                    KeyCode::Char('N') => {
+                        app.mode = Mode::NewProject;
+                        app.new_project_name.clear();
+                    }
+
+                    KeyCode::Char('A') => {
+                        app.mode = Mode::Adding;
+                        app.new_ref.clear();
+                    }
+
+                    _ => {}
+                }
+                app.clear_expired_alert();  
+            }
+        }
+
+    } // end loop
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
 
     Ok(())
 }
