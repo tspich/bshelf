@@ -1,9 +1,7 @@
 use serde::{Serialize, Deserialize};
-// use serde_json;
 use anyhow::Result;
-// use std::fmt::format;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::ops::Range;
 use reqwest::blocking;
 use serde_json::Value;
@@ -357,4 +355,25 @@ pub fn load_config() -> Config {
     toml::from_str(&contents)
         .expect("Invalid config file")
 }
+
+// pub fn load_or_create_config() -> Config {
+//     let config_dir = dirs::config_dir().unwrap().join("refman");
+//     let config_path = config_dir.join("config.toml");
+// 
+//     if !config_path.exists() {
+//         std::fs::create_dir_all(&config_dir).unwrap();
+// 
+//         let default = r#"
+// projects_dir = "~/refman/projects"
+// pdfs_dir = "~/refman/pdfs"
+// "#;
+// 
+//         std::fs::write(&config_path, default).unwrap();
+// 
+//         panic!("Config created at {:?}. Please edit it.", config_path);
+//     }
+// 
+//     let contents = std::fs::read_to_string(config_path).unwrap();
+//     toml::from_str(&contents).unwrap()
+// }
 

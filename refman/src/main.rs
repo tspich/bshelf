@@ -39,7 +39,6 @@ struct App {
     projects: Vec<String>,
     selected_project: usize,
     references: Vec<Entry>,
-    // references: Bibliography,
     selected_reference: usize,
     mode: Mode,
     search_mode: bool,
@@ -47,7 +46,6 @@ struct App {
     new_project_name: String,
     new_ref: String,
     filtered_refs: Vec<Entry>,
-    // filtered_refs: Bibliography,
     alert_message: Option<String>,
     alert_timer: Option<std::time::Instant>,
     list_state: ListState,
@@ -76,7 +74,6 @@ impl App {
             projects,
             selected_project: 0,
             references: Vec::new(),
-            // references: Bibliography::new(),
             selected_reference: 0,
             mode: Mode::Normal,
             search_mode: false,
@@ -84,7 +81,6 @@ impl App {
             new_project_name: String::new(),
             new_ref: String::new(),
             filtered_refs: Vec::new(),
-           // filtered_refs: Bibliography::new(),
             alert_message: None,
             alert_timer: None,
             list_state: ListState::default(),
@@ -106,7 +102,6 @@ impl App {
 
     fn clear_filtered_refs(&mut self) {
         self.filtered_refs.clear();
-        // self.filtered_refs = Bibliography::new();
     }
 
     fn enter_search_mode(&mut self) {
