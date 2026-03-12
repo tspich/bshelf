@@ -16,7 +16,7 @@ use std::{fs, io};
 use std::path::Path;
 use anyhow::Result;
 
-use refman::{
+use bshelf::{
     chunks_to_string,
     authors_to_string,
     date_to_year_string,

@@ -345,7 +345,7 @@ pub struct Config {
 pub fn load_config() -> Config {
     let config_dir = dirs::config_dir()
         .expect("Could not find config directory")
-        .join("refman");
+        .join("bshelf");
 
     let config_path = config_dir.join("config.toml");
 
