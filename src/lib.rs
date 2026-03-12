@@ -15,7 +15,7 @@ use crossterm::{
 };
 use std::io;
 use std::process::Command;
-
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Reference {
@@ -43,6 +43,7 @@ fn field<S: AsRef<str>>(s: S) -> Vec<Spanned<Chunk>> {
 //     vec![Spanned::detached(Chunk::Verbatim(s.as_ref().to_string()))]
 // }
 
+pub type ProjectsMap = HashMap<String, Vec<String>>;
 
 pub fn chunks_to_string(chunks: &[Spanned<Chunk>]) -> String {
     chunks
@@ -122,31 +123,90 @@ pub fn pages_string(
     }
 }
 
-pub fn add_reference(proj_file: &str, doi: &str) -> Result<()> {
-    // let proj_file = Path::new("projects").join(format!("{project}.bib"));
+// pub fn load_project(path: &str) -> Result<Vec<String>> {
+//     if !std::path::Path::new(path).exists() {
+//         return Ok(vec![]);
+//     }
+//     let content = fs::read_to_string(path)?;
+//     Ok(serde_json::from_str(&content)?)
+// }
 
-    // fs::create_dir_all("projects")?;
+pub fn load_projects_map(path: &str) -> Result<ProjectsMap> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(HashMap::new());
+    }
+    let content = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&content)?)
+}
 
+// pub fn save_project(path: &str, keys: &[String]) -> Result<()> {
+//     fs::write(path, serde_json::to_string_pretty(keys)?)?;
+//     Ok(())
+// }
 
+pub fn save_projects_map(path: &str, map: &ProjectsMap) -> Result<()> {
+    fs::write(path, serde_json::to_string_pretty(map)?)?;
+    Ok(())
+}
+
+// pub fn add_to_project(proj_path: &str, key: &str) -> Result<()> {
+//     let mut keys = load_project(proj_path)?;
+//     if !keys.contains(&key.to_string()) {
+//         keys.push(key.to_string());
+//         save_project(pro, &keys)?;
+//     }
+//     Ok(())
+// }
+
+pub fn add_to_project(proj_map_path: &str, project: &str, key: &str) -> Result<()> {
+    let mut map = load_projects_map(proj_map_path)?;
+    let keys = map.entry(project.to_string()).or_default();
+    if !keys.contains(&key.to_string()) {
+        keys.push(key.to_string());
+        save_projects_map(proj_map_path, &map)?;
+    }
+    Ok(())
+}
+
+// pub fn remove_from_project(proj_path: &str, key: &str) -> Result<()> {
+//     let mut keys = load_project(proj_path)?;
+//     keys.retain(|k| k != key);
+//     save_project(proj_path, &keys)
+// }
+
+pub fn remove_from_project(proj_map_path: &str, project: &str, key: &str) -> Result<()> {
+    let mut map = load_projects_map(proj_map_path)?;
+    if let Some(keys) = map.get_mut(project) {
+        keys.retain(|k| k != key);
+        save_projects_map(proj_map_path, &map)?;
+    }
+    Ok(())
+}
+
+pub fn project_entries<'a>(
+    bib: &'a Bibliography,
+    keys: &[String],
+) -> Vec<&'a Entry> {
+    keys.iter()
+    .filter_map(|k| bib.get(k))
+    .collect()
+}
+
+pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     // 1. Load bibliography
-    // let mut bib = load_bib(&proj_file)?;
-    let content = fs::read_to_string(&proj_file)?;
+    let content = fs::read_to_string(&all_bib)?;
     let mut bib = Bibliography::parse(&content)?;
 
     let doi_url = format!("https://doi.org/{doi}");
 
     // 2. Duplicate check
-    if bib.iter().any(|e| {
+    if let Some(existing) = bib.iter().find(|e| {
         e.get("doi")
-            .map(|chunks|{
-                chunks.iter().any(|c| {
-                   c.v.get() == doi_url 
-                })
-            }) 
+            .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url)) 
             .unwrap_or(false)
     }){
-        println!("⚠️ DOI already exists: {doi_url}");
-        return Ok(());
+        // println!("⚠️ DOI already exists: {doi_url}");
+        return Ok(existing.key.clone());
     }
 
     // 3. Fetch Crossref
@@ -225,7 +285,7 @@ pub fn add_reference(proj_file: &str, doi: &str) -> Result<()> {
 
 
     // 5. Build BibTeX entry
-    let mut entry = Entry::new(key, EntryType::Article);
+    let mut entry = Entry::new(key.clone(), EntryType::Article);
 
     entry.set("title", field(title));
     entry.set("author", field(authors.join(" and ")));
@@ -268,12 +328,11 @@ pub fn add_reference(proj_file: &str, doi: &str) -> Result<()> {
 
     // 7. Add + save
     bib.insert(entry);
-    //save_bib(&proj_file, &bib)?;
-    // fs::write(&proj_file, bib.to_bibtex_string())?;
-    fs::write(&proj_file, bib.to_biblatex_string())?;
+    // fs::write(&all_bib, bib.to_bibtex_string())?;
+    fs::write(&all_bib, bib.to_biblatex_string())?;
 
     //println!("✅ Added {doi} to project {project}");
-    Ok(())
+    Ok(key)
 }
 
 pub fn entry_matches(entry: &biblatex::Entry, query: &str) -> bool {
@@ -337,8 +396,9 @@ pub fn open_editor(path: &str, key: &str) -> io::Result<()> {
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    pub projects_dir: PathBuf,
+    pub projects_file: PathBuf,
     pub pdfs_dir: PathBuf,
+    pub all_bib: PathBuf,
 }
 
 
@@ -355,6 +415,45 @@ pub fn load_config() -> Config {
     toml::from_str(&contents)
         .expect("Invalid config file")
 }
+
+// pub fn entry_to_reference(entry: &Entry) -> Reference {
+//     let title = entry.get("title")
+//         .map(|c| chunks_to_string(c))
+//         .unwrap_or_default();
+// 
+//     let authors = entry.author().ok()
+//         .map(|authors| authors.iter().map(|a| {
+//             format!("{} {}", a.given_name, a.name).trim().to_string()
+//         }).collect())
+//         .unwrap_or_default();
+// 
+//     let year = entry.date().ok()
+//         .and_then(|d| date_to_year_string(d))
+//         .and_then(|s| s.parse().ok());
+// 
+//     let doi = entry.get("doi").map(|c| chunks_to_string(c));
+//     let abstract_text = entry.get("abstract").map(|c| chunks_to_string(c));
+//     let journal = entry.get("journal").map(|c| chunks_to_string(c));
+//     let volume = entry.get("volume").map(|c| chunks_to_string(c));
+//     let number = entry.get("issue").map(|c| chunks_to_string(c));
+//     let pages = entry.get("pages").map(|c| chunks_to_string(c));
+//     let issn = entry.get("issn").map(|c| chunks_to_string(c));
+//     let publisher = entry.get("publisher").map(|c| chunks_to_string(c));
+// 
+//     Reference {
+//         title,
+//         authors,
+//         year,
+//         doi,
+//         abstract_text,
+//         journal,
+//         volume,
+//         number,
+//         pages,
+//         issn,
+//         publisher,
+//     }
+// }
 
 // pub fn load_or_create_config() -> Config {
 //     let config_dir = dirs::config_dir().unwrap().join("refman");

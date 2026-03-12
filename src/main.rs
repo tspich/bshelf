@@ -13,18 +13,23 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{fs, io};
-use std::path::Path;
+// use std::path::Path;
 use anyhow::Result;
 
 use bshelf::{
-    chunks_to_string,
-    authors_to_string,
-    date_to_year_string,
-    publisher_string,
-    entry_matches,
     add_reference,
+    add_to_project,
+    authors_to_string,
+    chunks_to_string,
+    date_to_year_string,
+    entry_matches,
+    load_config,
+    publisher_string,
     Config,
-    load_config
+    load_projects_map,
+    ProjectsMap,
+    save_projects_map,
+    remove_from_project,
 }; // <-- crate name = [package].name in Cargo.toml
 
 // TODO: 
@@ -60,15 +65,14 @@ enum Mode {
 
 impl App {
     fn new(config: Config) -> Self {
-        let mut projects = vec![];
+        let proj_map_path = config.projects_file.to_string_lossy().to_string();
+        let mut projects: Vec<String> = load_projects_map(&proj_map_path)
+            .map(|map| map.into_keys().collect())
+            .unwrap_or_default();
 
-        if let Ok(entries) = fs::read_dir(&config.projects_dir) {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.path().file_stem() {
-                    projects.push(name.to_string_lossy().to_string());
-                }
-            }
-        }
+        projects.sort();
+        projects.insert(0, "all".to_string());
+
         App {
             config,
             projects,
@@ -88,16 +92,59 @@ impl App {
     }
 
     fn load_references(&mut self) {
-        if let Some(project) = self.projects.get(self.selected_project) {
-            let path = format!("{}/{}.bib", self.config.projects_dir.display(), project);
-            if let Ok(data) = fs::read_to_string(&path) {
-                if let Ok(refs) = Bibliography::parse(&data) {
-                    self.references = refs.iter().cloned().collect();
-                    self.references.sort_by(|a, b| a.key.cmp(&b.key));
-                    self.selected_reference = 0;
-                }
+        let all_bib_path = self.config.all_bib.to_string_lossy().to_string();
+
+        let bib = fs::read_to_string(&all_bib_path)
+            .ok()
+            .and_then(|content| Bibliography::parse(&content).ok())
+            .unwrap_or_default();
+
+        let selected = self.projects.get(self.selected_project).map(|s| s.as_str());
+
+        let mut refs: Vec<Entry> = match selected {
+            Some("all") => bib.iter().cloned().collect(),  // all entries
+            Some(project) => {
+                let proj_map_path = self.config.projects_file.to_string_lossy().to_string();
+                let map: ProjectsMap = fs::read_to_string(&proj_map_path)
+                    .ok()
+                    .and_then(|data| serde_json::from_str(&data).ok())
+                    .unwrap_or_default();
+
+                let keys = map.get(project).cloned().unwrap_or_default();
+                keys.iter().filter_map(|k| bib.get(k)).cloned().collect()
             }
-        }
+            None => vec![],
+        };
+
+        refs.sort_by(|a, b| a.key.cmp(&b.key));
+        self.references = refs;
+        self.selected_reference = 0;
+
+        // if let Some(project) = self.projects.get(self.selected_project) {
+        //     let proj_map_path = self.config.projects_file.to_string_lossy().to_string();
+        //     let all_bib_path = self.config.all_bib.to_string_lossy().to_string();
+
+        //     let map: ProjectsMap = fs::read_to_string(&proj_map_path)
+        //         .ok()
+        //         .and_then(|data| serde_json::from_str(&data).ok())
+        //         .unwrap_or_default();
+
+        //     let keys = map.get(project.as_str()).cloned().unwrap_or_default();
+
+        //     let bib = fs::read_to_string(&all_bib_path)
+        //         .ok()
+        //         .and_then(|content| Bibliography::parse(&content).ok())
+        //         .unwrap_or_default();
+
+        //     let mut refs: Vec<Entry> = keys.iter()
+        //         .filter_map(|key| bib.get(key))
+        //         .cloned()
+        //         .collect();
+
+        //     refs.sort_by(|a, b| a.key.cmp(&b.key));
+        //     self.references = refs;
+        //     self.selected_reference = 0;
+        // }
     }
 
     fn clear_filtered_refs(&mut self) {
@@ -157,16 +204,29 @@ impl App {
         Ok(())
     }
 
-    /// Create a new project bib file (empty list).
+    /// Create a new project in projects_file (empty list).
+    //fn new_project(&self, project: &str) -> Result<()> {
+    //    fs::create_dir_all(&self.config.projects_dir)?;
+    //    let proj_file = format!("{}/{}.json", self.config.projects_dir.display(), project);
+    //    if !Path::new(&proj_file).exists() {
+    //        fs::write(&proj_file, "")?;
+    //    }
+    //    Ok(())
+    //}
     fn new_project(&self, project: &str) -> Result<()> {
-        fs::create_dir_all(&self.config.projects_dir)?;
-        let proj_file = format!("{}/{}.bib", self.config.projects_dir.display(), project);
-        if !Path::new(&proj_file).exists() {
-            fs::write(&proj_file, "")?;
+        if project == "all" {
+            anyhow::bail!("'all' is a reserved project name");
+        }
+
+        let proj_map_path = self.config.projects_file.to_string_lossy().to_string();
+        let mut map = load_projects_map(&proj_map_path)?;
+        
+        if !map.contains_key(project) {
+            map.insert(project.to_string(), vec![]);
+            save_projects_map(&proj_map_path, &map)?;
         }
         Ok(())
     }
-
 }
 
 fn main() -> anyhow::Result<()> {
@@ -195,8 +255,8 @@ fn main() -> anyhow::Result<()> {
                 .direction(Direction::Horizontal)
                 .constraints([
                     Constraint::Percentage(20),
-                    Constraint::Percentage(40),
-                    Constraint::Percentage(40),
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(50),
                 ])
                 .split(vchunks[0]);
 
@@ -252,7 +312,6 @@ fn main() -> anyhow::Result<()> {
                 let r = &refs_to_show[app.selected_reference];
                 format!(
                     "Title:\n{}\nAuthors:\n{}\nYear: {}\nJournal: {}\nDOI: {}\nPublisher: {}\nAbstract:\n {}",
-                    //"Title:\n{}\n\nAuthors:\n{}\n\nYear:\t{}\nJournal:\t{}\nDOI:\t{}\nPublisher:\t{}\nAbstract:\n {}",
                     r.title().ok().map(chunks_to_string).unwrap_or_else(|| "<no title>".to_string()),
                     r.author().ok().map(authors_to_string).unwrap_or_else(|| "no authors".to_string()),
                     r.date().ok().and_then(date_to_year_string).unwrap_or_else(|| "<no year>".to_string()),
@@ -399,14 +458,15 @@ fn main() -> anyhow::Result<()> {
 
                     KeyCode::Enter if matches!(app.mode, Mode::NewProject) => {
                         if !app.new_project_name.is_empty() {
-                            if !Path::new(&format!("{}/{}.bib", app.config.projects_dir.display(), app.new_project_name)).exists() {
-                                let _ = app.new_project(&app.new_project_name);  // you already import this
+                            if !app.projects.contains(&app.new_project_name) && app.new_project_name != "all" {
+                                let _ = app.new_project(&app.new_project_name);
                                 app.projects.push(app.new_project_name.clone());
-                                app.selected_project = app.projects.len() - 1;
+                                app.projects.sort();
+                                app.selected_project = app.projects.iter().position(|p| p == &app.new_project_name).unwrap_or(0);
                                 app.load_references();
                                 app.show_alert(&format!("Created new project: {}", app.new_project_name));
                             } else {
-                                app.show_alert(&format!("project {} already exists!", app.new_project_name));
+                                app.show_alert(&format!("Project {} already exists!", app.new_project_name));
                             }
                         }
                     
@@ -415,9 +475,11 @@ fn main() -> anyhow::Result<()> {
 
                     KeyCode::Enter if matches!(app.mode, Mode::Adding) => {
                         if !app.new_ref.is_empty() {
-                            let proj_file = format!("{}/{}.bib", app.config.projects_dir.display(), &app.projects[app.selected_project]);
+                            let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
 
-                            let _ = add_reference(&proj_file, &app.new_ref);  // you already import this
+                            let key = add_reference(&all_bib_path, &app.new_ref)?;
+
+                            add_to_project(&all_bib_path, &app.projects[app.selected_project], &key)?;
 
                             // let _ = add_reference(&app.projects[app.selected_project], &app.new_ref);  // you already import this
                             app.load_references();
@@ -477,19 +539,15 @@ fn main() -> anyhow::Result<()> {
                             } else {
                                 app.references.clone()
                             };
-                            // let active_refs = active_refs.into_vec();
 
                             if let Some(r) = active_refs.get(app.selected_reference) {
-                                // Try using explicit pdf path from JSON first
-                                // let pdf_path = if let Some(p) = &r.pdf {
-                                //     std::path::PathBuf::from(p)
-                                // } else
-                                let pdf_path = if let doi = &r.doi().ok() {
+                                let pdf_path = {
                                     // Sanitize DOI for filenames (replace '/' with '-')
-                                    let safe_name = doi.as_deref().unwrap_or("").replace('/', "-");
-                                    std::path::Path::new("pdfs").join(format!("{safe_name}.pdf"))
-                                } else {
-                                    std::path::PathBuf::new()
+                                    let safe_name = r.doi().ok()
+                                        .as_deref()
+                                        .unwrap_or("")
+                                        .replace('/', "-");
+                                    app.config.pdfs_dir.join(format!("{safe_name}.pdf"))
                                 };
 
                                 if pdf_path.exists() {
@@ -497,10 +555,9 @@ fn main() -> anyhow::Result<()> {
                                         .arg(&pdf_path)
                                         .spawn()
                                     {
-                                        eprintln!("Failed to open PDF: {}", err);
+                                        app.show_alert(&format!("Failed to open PDF: {}", err));
                                     }
                                 } else {
-                                    //eprintln!("PDF not found: {}", pdf_path.display());
                                     app.show_alert(&format!("PDF not found: {}", pdf_path.display()));
                                 }
                             }
@@ -508,26 +565,37 @@ fn main() -> anyhow::Result<()> {
                     }
 
                     KeyCode::Char('e') => {
-                        if let Some(project) = app.projects.get(app.selected_project) {
-                            let path = format!("{}/{}.bib", app.config.projects_dir.display(), project);
+                        if let Some(entry) = app.references.get(app.selected_reference) {
+                            let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                            let key = &entry.key.clone();
 
-                            if let Some(entry) = app.references.get(app.selected_reference) {
-                                let key = &entry.key;
+                            app.suspend_tui().ok();
+                            let editor = std::env::var("EDITOR").unwrap_or("nvim".into());
+                            let _ = std::process::Command::new(editor)
+                                .arg(format!("+/@.*{{{},", key))
+                                .arg(&all_bib_path)
+                                .status();
+                            app.resume_tui().ok();
+                            terminal.clear().ok();
 
-                                app.suspend_tui().ok();
-                                let editor = std::env::var("EDITOR").unwrap_or("nvim".into());
-
-                                let _ = std::process::Command::new(editor)
-                                    .arg(format!("+/@.*{{{},", key))
-                                    .arg(&path)
-                                    .status();   // BLOCK
-
-                                app.resume_tui().ok();
-
-                                terminal.clear().ok();
-                                app.load_references();
-
+                            // Check if key was renamed: reload bib and see if old key still exists
+                            if let Ok(content) = fs::read_to_string(&all_bib_path) {
+                                if let Ok(bib) = Bibliography::parse(&content) {
+                                    if bib.get(key).is_none() {
+                                        // Key was renamed — find the new key by DOI match or just warn
+                                        app.show_alert(&format!(
+                                            "⚠️ Key '{key}' no longer exists in all.bib — update projects.json manually or re-add."
+                                        ));
+                                        // Optionally: remove stale key from project
+                                        if let Some(project) = app.projects.get(app.selected_project) {
+                                            let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+                                            let _ = remove_from_project(&proj_map_path, project, key);
+                                        }
+                                    }
+                                }
                             }
+                    
+                            app.load_references();
                         }
                     }
 
