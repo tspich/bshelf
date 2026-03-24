@@ -34,19 +34,35 @@ use bshelf::{
     import_bib_file,
     rename_project,
     delete_project,
+    refetch_metadata,
 }; // <-- crate name = [package].name in Cargo.toml
 
 // TODO: 
-//  - Cannot show more references than size of terminal! need scrolling
-//  - Search/filtering
-//  - Creating a new project should check if project already exists.
 //  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
+//  - Need scrolling for help
 //
+
+fn mode_name(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Normal           => "NORMAL",
+        Mode::Search           => "SEARCH",
+        Mode::NewProject       => "NEW PROJECT",
+        Mode::Adding           => "ADD REF",
+        Mode::Moving           => "COPY TO",
+        Mode::FileBrowser      => "FILE BROWSER",
+        Mode::RenameProject    => "RENAME",
+        Mode::ConfirmDelete    => "DELETE PROJECT",
+        Mode::ConfirmRemoveRef => "REMOVE REF",
+        Mode::Help             => "HELP",
+    }
+}
 
 struct FileBrowser {
     current_dir: std::path::PathBuf,
     entries: Vec<std::path::PathBuf>,
     selected: usize,
+    filter: String,
+    filtering: bool,
 }
 
 impl FileBrowser {
@@ -55,6 +71,8 @@ impl FileBrowser {
             current_dir: start,
             entries: Vec::new(),
             selected: 0,
+            filter: String::new(),
+            filtering: false,
         };
         fb.refresh();
         fb
@@ -66,6 +84,13 @@ impl FileBrowser {
                 let mut v: Vec<_> = rd
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_dir()
+                            || p.extension()
+                                .and_then(|e| e.to_str())
+                                .map(|e| e == "bib")
+                                .unwrap_or(false)
+                    })
                     .collect();
                 // Dirs first, then files, both sorted alphabetically
                 v.sort_by(|a, b| {
@@ -81,19 +106,40 @@ impl FileBrowser {
         entries.insert(0, self.current_dir.join(".."));
         self.entries = entries;
         self.selected = 0;
+        self.filter.clear();
+        self.filtering = false;
+    }
+
+    // Returns entries filtered by current search string
+    fn visible_entries(&self) -> Vec<&std::path::PathBuf> {
+        if self.filter.is_empty() {
+            self.entries.iter().collect()
+        } else {
+            self.entries
+                .iter()
+                .filter(|p| {
+                    // Always show ".."
+                    p.ends_with("..")
+                        || p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.to_lowercase().contains(&self.filter.to_lowercase()))
+                            .unwrap_or(false)
+                })
+                .collect()
+        }
     }
 
     fn enter(&mut self) -> Option<std::path::PathBuf> {
-        if let Some(path) = self.entries.get(self.selected) {
+        let visible = self.visible_entries();
+        if let Some(path) = visible.get(self.selected) {
             if path.is_dir() {
-                // Canonicalize handles the ".." case
                 if let Ok(canonical) = path.canonicalize() {
                     self.current_dir = canonical;
                     self.refresh();
                 }
                 None
             } else {
-                Some(path.clone())
+                Some((*path).clone())
             }
         } else {
             None
@@ -118,7 +164,6 @@ struct App {
     alert_timer: Option<std::time::Instant>,
     list_state: ListState,
     moving_target: usize,
-    import_path: String,
     file_browser: Option<FileBrowser>,
     rename_project_name: String,
     project_scroll: usize,
@@ -132,7 +177,6 @@ enum Mode {
     NewProject,
     Adding,
     Moving,
-    Importing,
     FileBrowser,
     Help,
     RenameProject,
@@ -166,7 +210,6 @@ impl App {
             alert_timer: None,
             list_state: ListState::default(),
             moving_target: 0,
-            import_path: String::new(),
             file_browser: None,
             rename_project_name: String::new(),
             project_scroll: 0,
@@ -317,7 +360,11 @@ fn main() -> anyhow::Result<()> {
             // make vertical layout: top = the three panels, bottom = search box (length 3)
             let vchunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(3),
+                    Constraint::Length(1)
+                ].as_ref())
                 .split(f.size());
 
             // top row: three panels
@@ -557,7 +604,6 @@ fn main() -> anyhow::Result<()> {
                         height: size.height * 3 / 4,
                     };
             
-                    // Current dir as title, truncated from the left if too long
                     let dir_str = fb.current_dir.to_string_lossy();
                     let max_title = area.width.saturating_sub(4) as usize;
                     let title = if dir_str.len() > max_title {
@@ -566,15 +612,18 @@ fn main() -> anyhow::Result<()> {
                         dir_str.to_string()
                     };
             
-                    let inner_height = area.height.saturating_sub(2) as usize;
-                    // Scroll window so selected entry is always visible
+                    // Reserve 1 line for search bar at the bottom, 1 for hint
+                    let inner_height = area.height.saturating_sub(4) as usize;
+            
+                    let visible = fb.visible_entries();
+            
                     let scroll_offset = if fb.selected >= inner_height {
                         fb.selected - inner_height + 1
                     } else {
                         0
                     };
             
-                    let items: Vec<ListItem> = fb.entries
+                    let items: Vec<ListItem> = visible
                         .iter()
                         .enumerate()
                         .skip(scroll_offset)
@@ -610,17 +659,54 @@ fn main() -> anyhow::Result<()> {
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Yellow));
             
-                    let list = List::new(items).block(block);
-            
                     f.render_widget(Clear, area);
-                    f.render_widget(list, area);
+                    f.render_widget(List::new(items).block(block), area);
             
-                    // Footer hint
-                    let hint = Paragraph::new(" Enter: open/select   j/k: navigate   Esc: cancel ")
-                        .style(Style::default().fg(Color::DarkGray));
-                    let hint_area = Rect { x: area.x + 1, y: area.y + area.height - 1, width: area.width - 2, height: 1 };
-                    f.render_widget(Clear, hint_area); // clear
-                    f.render_widget(hint, hint_area);
+                    // Search bar
+                    let search_area = Rect {
+                        x: area.x + 1,
+                        y: area.y + area.height - 3,
+                        width: area.width - 2,
+                        height: 1,
+                    };
+                    let search_text = if fb.filtering {
+                        format!(" 🔍 {}_", fb.filter) // underscore acts as a cursor
+                    } else if !fb.filter.is_empty() {
+                        format!(" 🔍 {} (Esc to clear)", fb.filter)
+                    } else {
+                        " Press / to filter".to_string()
+                    };
+                    
+                    let search_style = if fb.filtering {
+                        Style::default().fg(Color::Green)
+                    } else if !fb.filter.is_empty() {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::Green)
+                    };
+                    f.render_widget(
+                        Paragraph::new(search_text).style(search_style),
+                        search_area,
+                    );
+            
+                    // Hint
+                    let hint_area = Rect {
+                        x: area.x + 1,
+                        y: area.y + area.height - 2,
+                        width: area.width - 2,
+                        height: 1,
+                    };
+                    f.render_widget(Clear, hint_area);
+                    let hint = if fb.filtering {
+                        " Enter: apply   Esc: cancel filter"
+                    } else {
+                        " Enter: open/select   j/k: navigate   /: filter   Esc: close"
+                    };
+                    
+                    f.render_widget(
+                        Paragraph::new(hint).style(Style::default().fg(Color::Green)),
+                        hint_area,
+                    );
                 }
             }
 
@@ -646,12 +732,13 @@ fn main() -> anyhow::Result<()> {
                     "  ──────────────────────────────────────",
                     "  A             Add reference by DOI",
                     "  B             Export project to .bib",
-                    "  I             Import a .bib file",
+                    "  I             Import .bib file",
                     "  M             Copy reference to project",
                     "  N             Create new project",
                     "  R             Rename current project",
                     "  D             Delete reference from project",
                     "  e             Edit reference in $EDITOR",
+                    "  F             Re-fetch missing metadata from Crossref",
                     "  Enter         Open PDF (if available)",
                     "",
                     "  SEARCH",
@@ -765,28 +852,38 @@ fn main() -> anyhow::Result<()> {
                 f.render_widget(confirm, area);
             }
 
-            // if matches!(app.mode, Mode::Importing) {
-            //     let size = f.size();
-            //     let area = Rect {
-            //         x: size.width / 4,
-            //         y: size.height / 2 - 2,
-            //         width: size.width / 2,
-            //         height: 3,
-            //     };
-            // 
-            //     f.render_widget(Clear, area);
-            // 
-            //     let label = if app.projects[app.selected_project] != "all" {
-            //         format!("Import .bib path (→ all.bib + '{}')", app.projects[app.selected_project])
-            //     } else {
-            //         "Import .bib path (→ all.bib only)".to_string()
-            //     };
-            // 
-            //     let input = Paragraph::new(app.import_path.as_str())
-            //         .block(Block::default().title(label).borders(Borders::ALL));
-            // 
-            //     f.render_widget(input, area);
-            // }
+            let current_project = &app.projects[app.selected_project];
+            
+            let active_refs = if !app.filtered_refs.is_empty() {
+                &app.filtered_refs
+            } else {
+                &app.references
+            };
+            
+            let mode_str = format!(" {} ", mode_name(&app.mode));
+            let project_str = format!(" 📁 {}", current_project);
+            let count_str = format!("{} refs ", active_refs.len());
+            
+            // Left: mode | project    Right: ref count
+            let left = format!("{}  {}", mode_str, project_str);
+            let padding = vchunks[2].width
+                .saturating_sub(left.len() as u16)
+                .saturating_sub(count_str.len() as u16);
+            let spacer = " ".repeat(padding as usize);
+            let full_line = format!("{}{}{}", left, spacer, count_str);
+            
+            let mode_color = match &app.mode {
+                Mode::Normal           => Color::Green,
+                Mode::Search           => Color::Yellow,
+                Mode::ConfirmDelete
+                | Mode::ConfirmRemoveRef => Color::Red,
+                _                      => Color::Blue,
+            };
+            
+            let status = Paragraph::new(full_line)
+                .style(Style::default().fg(Color::Black).bg(mode_color));
+            
+            f.render_widget(status, vchunks[2]);
 
         })?;
 
@@ -1010,7 +1107,7 @@ fn main() -> anyhow::Result<()> {
 
 
                     // 🔍 Enter search mode
-                    KeyCode::Char('/') => {
+                    KeyCode::Char('/') if matches!(app.mode, Mode::Normal) => {
                         app.enter_search_mode();
                     }
 
@@ -1106,13 +1203,71 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
+                    KeyCode::Char('F') if matches!(app.mode, Mode::Normal) => {
+                        let active_refs = if !app.filtered_refs.is_empty() {
+                            app.filtered_refs.clone()
+                        } else {
+                            app.references.clone()
+                        };
+                    
+                        if let Some(entry) = active_refs.get(app.selected_reference) {
+                            let key = entry.key.clone();
+                            let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                    
+                            app.suspend_tui().ok();
+                            println!("Fetching metadata for '{}'...", key);
+                    
+                            let result = refetch_metadata(&all_bib_path, &key);
+                    
+                            app.resume_tui().ok();
+                            terminal.clear().ok();
+                    
+                            match result {
+                                Ok(_) => {
+                                    app.load_references();
+                                    // Reselect the just-fetched reference
+                                    if let Some(idx) = app.references.iter().position(|e| e.key == key) {
+                                        app.selected_reference = idx;
+                                    }
+                                    app.show_alert(&format!("Metadata updated for '{}'", key));
+                                }
+                                Err(e) => app.show_alert(&format!("Fetch failed: {e}")),
+                            }
+                        }
+                    }
+
+                    // Open FileBrowser to import file
                     KeyCode::Char('I') if matches!(app.mode, Mode::Normal) => {
                         //let start = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
                         let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                         app.file_browser = Some(FileBrowser::new(start));
                         app.mode = Mode::FileBrowser;
                     }
-                    
+
+                    // Enter filter mode
+                    KeyCode::Char('/') if matches!(app.mode, Mode::FileBrowser) => {
+                        if let Some(fb) = &mut app.file_browser {
+                            fb.filtering = true;
+                            fb.filter.clear();
+                            fb.selected = 1;
+                        }
+                    }
+
+                    // Exit filter mode
+                    KeyCode::Esc if matches!(app.mode, Mode::FileBrowser) => {
+                        if let Some(fb) = &mut app.file_browser {
+                            if fb.filtering {
+                                fb.filtering = false;
+                                fb.filter.clear();
+                                fb.selected = 0;
+                            } else {
+                                app.file_browser = None;
+                                app.mode = Mode::Normal;
+                            }
+                        }
+                    }
+
+                    // Move up in FileBrowser
                     KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::FileBrowser) => {
                         if let Some(fb) = &mut app.file_browser {
                             if fb.selected > 0 {
@@ -1121,14 +1276,36 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     
+                    // Move Down in FileBrowser
                     KeyCode::Down | KeyCode::Char('j') if matches!(app.mode, Mode::FileBrowser) => {
                         if let Some(fb) = &mut app.file_browser {
-                            if fb.selected + 1 < fb.entries.len() {
+                            let count = fb.visible_entries().len();
+                            if fb.selected + 1 < count {
                                 fb.selected += 1;
                             }
                         }
                     }
 
+                    // Write file name
+                    KeyCode::Char(c) if matches!(app.mode, Mode::FileBrowser) => {
+                        if let Some(fb) = &mut app.file_browser {
+                            if fb.filtering{
+                                fb.filter.push(c);
+                                fb.selected = 1; // reset selection on filter change
+                            }
+                        }
+                    }
+                    
+                    // Backspace file name search
+                    KeyCode::Backspace if matches!(app.mode, Mode::FileBrowser) => {
+                        if let Some(fb) = &mut app.file_browser {
+                            if fb.filtering{
+                                fb.filter.pop();
+                                fb.selected = 1;
+                            }
+                        }
+                    }
+                    
                     KeyCode::Enter if matches!(app.mode, Mode::FileBrowser) => {
                         let selected_file = app.file_browser.as_mut().and_then(|fb| fb.enter());
                     
@@ -1278,20 +1455,6 @@ fn main() -> anyhow::Result<()> {
                             app.show_alert("Cannot delete 'all'");
                         } else {
                             app.mode = Mode::ConfirmDelete;
-                            // let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
-                    
-                            // match delete_project(&proj_map_path, &current) {
-                            //     Ok(_) => {
-                            //         app.projects.remove(app.selected_project);
-                            //         // Make sure selection doesn't go out of bounds
-                            //         app.selected_project = app.selected_project
-                            //             .saturating_sub(1)
-                            //             .min(app.projects.len().saturating_sub(1));
-                            //         app.load_references();
-                            //         app.show_alert(&format!("Deleted project '{}'", current));
-                            //     }
-                            //     Err(e) => app.show_alert(&format!("Delete failed: {e}")),
-                            // }
                         }
                     }
 
@@ -1320,61 +1483,6 @@ fn main() -> anyhow::Result<()> {
                         app.mode = Mode::Normal;
                     }
                     
-                    // KeyCode::Char(c) if matches!(app.mode, Mode::Importing) => {
-                    //     app.import_path.push(c);
-                    // }
-                    // 
-                    // KeyCode::Backspace if matches!(app.mode, Mode::Importing) => {
-                    //     app.import_path.pop();
-                    // }
-                    // 
-                    // KeyCode::Esc if matches!(app.mode, Mode::Importing) => {
-                    //     app.mode = Mode::Normal;
-                    // }
-                    
-                    // KeyCode::Enter if matches!(app.mode, Mode::Importing) => {
-                    //     if !app.import_path.is_empty() {
-                    //         let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
-                    //         let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
-                    //         let import_path = app.import_path.trim().to_string();
-                    // 
-                    //         // Expand ~ if present
-                    //         let expanded = if import_path.starts_with("~/") {
-                    //             dirs::home_dir()
-                    //                 .map(|h| h.join(&import_path[2..]))
-                    //                 .and_then(|p| p.to_str().map(|s| s.to_string()))
-                    //                 .unwrap_or(import_path.clone())
-                    //         } else {
-                    //             import_path.clone()
-                    //         };
-                    // 
-                    //         match import_bib_file(&all_bib_path, &expanded) {
-                    //             Ok(keys) if keys.is_empty() => {
-                    //                 app.show_alert("No new entries found (all already exist)");
-                    //             }
-                    //             Ok(keys) => {
-                    //                 // If current project is not "all", also add imported keys to it
-                    //                 let current_project = app.projects[app.selected_project].clone();
-                    //                 if current_project != "all" {
-                    //                     for key in &keys {
-                    //                         let _ = add_to_project(&proj_map_path, &current_project, key);
-                    //                     }
-                    //                     app.show_alert(&format!(
-                    //                         "Imported {} entries into '{}' and all.bib",
-                    //                         keys.len(), current_project
-                    //                     ));
-                    //                 } else {
-                    //                     app.show_alert(&format!(
-                    //                         "Imported {} entries into all.bib", keys.len()
-                    //                     ));
-                    //                 }
-                    //                 app.load_references();
-                    //             }
-                    //             Err(e) => app.show_alert(&format!("Import failed: {e}")),
-                    //         }
-                    //     }
-                    //     app.mode = Mode::Normal;
-                    // }
 
 
                     _ => {}

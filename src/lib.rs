@@ -472,3 +472,89 @@ pub fn delete_project(proj_map_path: &str, project: &str) -> Result<()> {
     save_projects_map(proj_map_path, &map)?;
     Ok(())
 }
+
+pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
+    let content = fs::read_to_string(all_bib_path)?;
+    let mut bib = Bibliography::parse(&content)?;
+
+    let entry = bib.get(key)
+        .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))?
+        .clone();
+
+    // Get DOI from entry — bail early if none
+    let doi = entry.get("doi")
+        .map(|c| chunks_to_string(c))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("No DOI found for '{}'", key))?;
+
+    // Strip https://doi.org/ prefix if present
+    let doi = doi
+        .strip_prefix("https://doi.org/")
+        .or_else(|| doi.strip_prefix("http://doi.org/"))
+        .unwrap_or(&doi)
+        .to_string();
+
+    let client = Crossref::builder()
+        .build()
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+    let work = client
+        .work(&doi)
+        .map_err(|e| anyhow::anyhow!("Crossref error: {e:?}"))?;
+
+    // Refetch only missing or empty fields
+    let entry = bib.get_mut(key).unwrap();
+
+    let is_empty = |e: &Entry, field: &str| {
+        e.get(field)
+            .map(|c| chunks_to_string(c).trim().is_empty())
+            .unwrap_or(true)
+    };
+
+    if is_empty(entry, "abstract") {
+        if let Some(abs) = &work.abstract_ {
+            entry.set("abstract", field(abs));
+        }
+    }
+
+    if is_empty(entry, "journal") {
+        if let Some(journal) = work.container_title.as_ref().and_then(|v| v.get(0)) {
+            entry.set("journal", field(journal));
+        }
+    }
+
+    if is_empty(entry, "volume") {
+        if let Some(vol) = &work.volume {
+            entry.set("volume", field(vol));
+        }
+    }
+
+    if is_empty(entry, "issue") {
+        if let Some(issue) = &work.issue {
+            entry.set("issue", field(issue));
+        }
+    }
+
+    if is_empty(entry, "pages") {
+        if let Some(pages) = &work.page {
+            entry.set("pages", field(pages));
+        }
+    }
+
+    if is_empty(entry, "issn") {
+        if let Some(issn) = &work.issn {
+            entry.set("issn", field(issn.join(", ")));
+        }
+    }
+
+    if is_empty(entry, "publisher") && !work.publisher.is_empty() {
+        entry.set("publisher", field(&work.publisher));
+    }
+
+    if is_empty(entry, "url") && !work.url.is_empty() {
+        entry.set("url", field(&work.url));
+    }
+
+    fs::write(all_bib_path, bib.to_biblatex_string())?;
+    Ok(())
+}
