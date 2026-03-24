@@ -26,6 +26,14 @@ fn field<S: AsRef<str>>(s: S) -> Vec<Spanned<Chunk>> {
 //     vec![Spanned::detached(Chunk::Verbatim(s.as_ref().to_string()))]
 // }
 
+fn uuid_fallback() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos().to_string())
+        .unwrap_or_else(|_| "dup".to_string())
+}
+
 pub type ProjectsMap = HashMap<String, Vec<String>>;
 
 pub fn chunks_to_string(chunks: &[Spanned<Chunk>]) -> String {
@@ -219,7 +227,22 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
         .unwrap_or_default();
 
     // 4. Citation key
-    let key = format!(
+    // let key = format!(
+    //     "{}_{}",
+    //     authors
+    //         .get(0)
+    //         .and_then(|a| a.split_whitespace().last())
+    //         .unwrap_or("ref")
+    //         .to_lowercase(),
+    //     year,
+    //     //title
+    //     //    .split_whitespace()
+    //     //    .next()
+    //     //    .unwrap_or("ref")
+    //     //    .to_lowercase(),
+    // );
+
+    let base_key = format!(
         "{}_{}",
         authors
             .get(0)
@@ -227,13 +250,17 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
             .unwrap_or("ref")
             .to_lowercase(),
         year,
-        //title
-        //    .split_whitespace()
-        //    .next()
-        //    .unwrap_or("ref")
-        //    .to_lowercase(),
     );
-
+    
+    let key = if bib.get(&base_key).is_none() {
+        base_key.clone()
+    } else {
+        // Find the first available suffix: smith_2023a, smith_2023b, ...
+        ('a'..='z')
+            .map(|c| format!("{}{}", base_key, c))
+            .find(|candidate| bib.get(candidate).is_none())
+            .unwrap_or_else(|| format!("{}_{}", base_key, uuid_fallback()))
+    };
 
     // 5. Build BibTeX entry
     let mut entry = Entry::new(key.clone(), EntryType::Article);
@@ -350,7 +377,6 @@ pub struct Config {
     pub all_bib: PathBuf,
 }
 
-
 pub fn load_config() -> Config {
     let config_dir = dirs::config_dir()
         .expect("Could not find config directory")
@@ -363,4 +389,86 @@ pub fn load_config() -> Config {
 
     toml::from_str(&contents)
         .expect("Invalid config file")
+}
+
+pub fn export_project_bib(all_bib_path: &str, proj_map_path: &str, project: &str, output_path: &str) -> Result<()> {
+    let content = fs::read_to_string(all_bib_path)?;
+    let bib = Bibliography::parse(&content)?;
+
+    let map = load_projects_map(proj_map_path)?;
+    let keys = map.get(project).cloned().unwrap_or_default();
+
+    let mut project_bib = Bibliography::new();
+    for key in &keys {
+        if let Some(entry) = bib.get(key) {
+            project_bib.insert(entry.clone());
+        }
+    }
+
+    fs::write(output_path, project_bib.to_biblatex_string())?;
+    Ok(())
+}
+
+pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<String>> {
+    let import_content = fs::read_to_string(import_path)?;
+    let import_bib = Bibliography::parse(&import_content)?;
+
+    let all_content = fs::read_to_string(all_bib_path).unwrap_or_default();
+    let mut all_bib = if all_content.is_empty() {
+        Bibliography::new()
+    } else {
+        Bibliography::parse(&all_content)?
+    };
+
+    let mut imported_keys = Vec::new();
+
+    for entry in import_bib.iter() {
+        // Deduplicate by DOI if present, otherwise by key
+        let already_exists = if let Some(doi_chunks) = entry.get("doi") {
+            let doi = chunks_to_string(doi_chunks);
+            all_bib.iter().any(|e| {
+                e.get("doi")
+                    .map(|c| chunks_to_string(c) == doi)
+                    .unwrap_or(false)
+            })
+        } else {
+            all_bib.get(&entry.key).is_some()
+        };
+
+        if !already_exists {
+            all_bib.insert(entry.clone());
+            imported_keys.push(entry.key.clone());
+        }
+    }
+
+    fs::write(all_bib_path, all_bib.to_biblatex_string())?;
+    Ok(imported_keys)
+}
+
+pub fn rename_project(proj_map_path: &str, old_name: &str, new_name: &str) -> Result<()> {
+    let mut map = load_projects_map(proj_map_path)?;
+
+    if !map.contains_key(old_name) {
+        anyhow::bail!("Project '{}' does not exist", old_name);
+    }
+    if map.contains_key(new_name) {
+        anyhow::bail!("Project '{}' already exists", new_name);
+    }
+
+    let keys = map.remove(old_name).unwrap_or_default();
+    map.insert(new_name.to_string(), keys);
+    save_projects_map(proj_map_path, &map)?;
+    Ok(())
+}
+
+pub fn delete_project(proj_map_path: &str, project: &str) -> Result<()> {
+    let mut map = load_projects_map(proj_map_path)?;
+
+    if !map.contains_key(project) {
+        anyhow::bail!("Project '{}' does not exist", project);
+    }
+
+    map.remove(project);
+    save_projects_map(proj_map_path, &map)?;
+    Ok(())
 }
