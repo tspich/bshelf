@@ -121,6 +121,9 @@ struct App {
     import_path: String,
     file_browser: Option<FileBrowser>,
     rename_project_name: String,
+    project_scroll: usize,
+    ref_scroll: usize,
+    detail_scroll: usize,
 }
 
 enum Mode {
@@ -166,6 +169,10 @@ impl App {
             import_path: String::new(),
             file_browser: None,
             rename_project_name: String::new(),
+            project_scroll: 0,
+            ref_scroll: 0,
+            detail_scroll: 0,
+
         }
     }
 
@@ -197,6 +204,8 @@ impl App {
         refs.sort_by(|a, b| a.key.cmp(&b.key));
         self.references = refs;
         self.selected_reference = 0;
+        self.ref_scroll = 0;
+        self.detail_scroll = 0;
     }
 
     fn clear_filtered_refs(&mut self) {
@@ -270,6 +279,24 @@ impl App {
         }
         Ok(())
     }
+
+    fn sync_ref_scroll(&mut self, panel_height: usize) {
+        let visible = panel_height.saturating_sub(2);
+        if self.selected_reference < self.ref_scroll {
+            self.ref_scroll = self.selected_reference;
+        } else if self.selected_reference >= self.ref_scroll + visible {
+            self.ref_scroll = self.selected_reference - visible + 1;
+        }
+    }
+    
+    fn sync_project_scroll(&mut self, panel_height: usize) {
+        let visible = panel_height.saturating_sub(2);
+        if self.selected_project < self.project_scroll {
+            self.project_scroll = self.selected_project;
+        } else if self.selected_project >= self.project_scroll + visible {
+            self.project_scroll = self.selected_project - visible + 1;
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -303,11 +330,30 @@ fn main() -> anyhow::Result<()> {
                 ])
                 .split(vchunks[0]);
 
-            // Left panel: projects
-            let project_items: Vec<ListItem> = app
+            // // Left panel: projects
+            // let project_items: Vec<ListItem> = app
+            //     .projects
+            //     .iter()
+            //     .enumerate()
+            //     .map(|(i, p)| {
+            //         let style = if i == app.selected_project {
+            //             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            //         } else {
+            //             Style::default()
+            //         };
+            //         ListItem::new(Span::styled(p, style))
+            //     })
+            //     .collect();
+
+            app.sync_ref_scroll(panels[1].height as usize);
+            app.sync_project_scroll(panels[0].height as usize);
+
+            let visible_projects: Vec<ListItem> = app
                 .projects
                 .iter()
                 .enumerate()
+                .skip(app.project_scroll)
+                .take(panels[0].height.saturating_sub(2) as usize)
                 .map(|(i, p)| {
                     let style = if i == app.selected_project {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -317,7 +363,8 @@ fn main() -> anyhow::Result<()> {
                     ListItem::new(Span::styled(p, style))
                 })
                 .collect();
-            let project_list = List::new(project_items)
+
+            let project_list = List::new(visible_projects)
                 .block(Block::default().title("Projects").borders(Borders::ALL));
             f.render_widget(project_list, panels[0]);
 
@@ -330,9 +377,25 @@ fn main() -> anyhow::Result<()> {
                 app.references.clone()
             };
 
-            let ref_items: Vec<ListItem> = refs_to_show
+            // let ref_items: Vec<ListItem> = refs_to_show
+            //     .iter()
+            //     .enumerate()
+            //     .map(|(i, r)| {
+            //         let key = r.key.to_string();
+            //         let style = if i == app.selected_reference {
+            //             Style::default().fg(Color::Cyan)
+            //         } else {
+            //             Style::default()
+            //         };
+            //         ListItem::new(Span::styled(key, style))
+            //     })
+            //     .collect();
+
+            let visible_refs: Vec<ListItem> = refs_to_show
                 .iter()
                 .enumerate()
+                .skip(app.ref_scroll)
+                .take(panels[1].height.saturating_sub(2) as usize)
                 .map(|(i, r)| {
                     let key = r.key.to_string();
                     let style = if i == app.selected_reference {
@@ -344,8 +407,7 @@ fn main() -> anyhow::Result<()> {
                 })
                 .collect();
 
-
-            let ref_list = List::new(ref_items)
+            let ref_list = List::new(visible_refs)
                 .block(Block::default().title("References").borders(Borders::ALL));
             // f.render_widget(ref_list, panels[1]);
             f.render_stateful_widget(ref_list, panels[1], &mut app.list_state);
@@ -371,6 +433,7 @@ fn main() -> anyhow::Result<()> {
 
             let ref_para = Paragraph::new(details)
                 .wrap(Wrap { trim: false })
+                .scroll((app.detail_scroll as u16, 0))
                 .block(Block::default().title("Details").borders(Borders::ALL));
             f.render_widget(ref_para, panels[2]);
 
@@ -577,6 +640,7 @@ fn main() -> anyhow::Result<()> {
                     "  l / →        Next project",
                     "  j / ↓        Next reference",
                     "  k / ↑        Previous reference",
+                    "  d / u         Scroll details panel down / up",
                     "",
                     "  ACTIONS",
                     "  ──────────────────────────────────────",
@@ -854,6 +918,7 @@ fn main() -> anyhow::Result<()> {
                     KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::Normal) => {
                         if app.selected_reference > 0 {
                             app.selected_reference -= 1;
+                            app.detail_scroll = 0;
                         }
                     }
 
@@ -865,12 +930,14 @@ fn main() -> anyhow::Result<()> {
                         };
                         if app.selected_reference + 1 < active_refs.len() {
                             app.selected_reference += 1;
+                            app.detail_scroll = 0;
                         }
                     }
 
                     KeyCode::Left | KeyCode::Char('h') if matches!(app.mode, Mode::Normal) => {
                         if app.selected_project > 0 {
                             app.selected_project -= 1;
+                            app.project_scroll = 0;
                             app.load_references();
                             app.clear_filtered_refs();
                         }
@@ -879,9 +946,19 @@ fn main() -> anyhow::Result<()> {
                     KeyCode::Right | KeyCode::Char('l') if matches!(app.mode, Mode::Normal) => {
                         if app.selected_project + 1 < app.projects.len() {
                             app.selected_project += 1;
+                            app.project_scroll = 0;
                             app.load_references();
                             app.clear_filtered_refs();
                         }
+                    }
+
+                    // Scroll detail panel
+                    KeyCode::Char('u') if matches!(app.mode, Mode::Normal) => {
+                        app.detail_scroll = app.detail_scroll.saturating_sub(3);
+                    }
+                    
+                    KeyCode::Char('d') if matches!(app.mode, Mode::Normal) => {
+                        app.detail_scroll += 3;
                     }
 
                     KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::Moving) => {
