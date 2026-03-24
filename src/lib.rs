@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::Deserialize;
 use anyhow::Result;
 use std::fs;
@@ -265,18 +266,18 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     // 5. Build BibTeX entry
     let mut entry = Entry::new(key.clone(), EntryType::Article);
 
-    entry.set("title", field(title));
-    entry.set("author", field(authors.join(" and ")));
-    entry.set("date", field(&year));
-    entry.set("journal", field(journal));
-    entry.set("volume", field(&volume));
-    entry.set("issue", field(&issue));
-    entry.set("pages", field(&pages));
-    entry.set("issn", field(&issn));
+    entry.set("title",     field(title));
+    entry.set("author",    field(authors.join(" and ")));
+    entry.set("date",      field(&year));
+    entry.set("journal",   field(journal));
+    entry.set("volume",    field(&volume));
+    entry.set("issue",     field(&issue));
+    entry.set("pages",     field(&pages));
+    entry.set("issn",      field(&issn));
     entry.set("publisher", field(&publisher));
-    entry.set("doi", field(&doi));
-    entry.set("url", field(&doi_url));
-    entry.set("abstract", field(&abstract_text));
+    entry.set("doi",       field(&doi));
+    entry.set("url",       field(&doi_url));
+    entry.set("abstract",  field(&abstract_text));
 
 
     // 6. Unpaywall PDF
@@ -556,5 +557,45 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
     }
 
     fs::write(all_bib_path, bib.to_biblatex_string())?;
+    Ok(())
+}
+
+pub fn extract_doi_from_pdf(pdf_path: &str) -> Option<String> {
+    // Shell out to pdftotext, read first 3 pages only
+    let output = std::process::Command::new("pdftotext")
+        .args(["-l", "3", pdf_path, "-"])
+        .output()
+        .ok()?;
+
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Match common DOI patterns
+    let doi_re = Regex::new(
+        r"10\.\d{4,}/\S+"
+    ).ok()?;
+        // r"(?i)(?:doi[:\s]*|https?://doi\.org/|doi\.org/)(10\.\d{4,}/[^\s\]\)\}\>\,';]+)"
+
+    doi_re.captures(&text)
+        .and_then(|c| c.get(0))
+        .map(|m| m.as_str().trim_end_matches('.').to_string())
+}
+
+pub fn link_pdf_to_entry(all_bib_path: &str, key: &str, pdf_path: &str) -> Result<()> {
+    let content = fs::read_to_string(all_bib_path)?;
+    let mut bib = Bibliography::parse(&content)?;
+
+    let entry = bib.get_mut(key)
+        .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))?;
+
+    // Only set if not already linked
+    let already_linked = entry.get("file")
+        .map(|c| !chunks_to_string(c).is_empty())
+        .unwrap_or(false);
+
+    if !already_linked {
+        entry.set("file", field(pdf_path));
+        fs::write(all_bib_path, bib.to_biblatex_string())?;
+    }
+
     Ok(())
 }

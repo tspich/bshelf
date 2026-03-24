@@ -35,11 +35,15 @@ use bshelf::{
     rename_project,
     delete_project,
     refetch_metadata,
+    extract_doi_from_pdf,
+    link_pdf_to_entry,
 }; // <-- crate name = [package].name in Cargo.toml
 
 // TODO: 
 //  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
 //  - Need scrolling for help
+//  - Get Doi from pdf and add new ref working well, adapt linking pdf file:
+//      - copy file bshelf/pdfs/{doi}.pdf
 //
 
 fn mode_name(mode: &Mode) -> &'static str {
@@ -54,7 +58,13 @@ fn mode_name(mode: &Mode) -> &'static str {
         Mode::ConfirmDelete    => "DELETE PROJECT",
         Mode::ConfirmRemoveRef => "REMOVE REF",
         Mode::Help             => "HELP",
+        Mode::PdfDoi           => "PDF",
     }
+}
+
+enum FileBrowserMode {
+    Bib,
+    Pdf,
 }
 
 struct FileBrowser {
@@ -63,16 +73,18 @@ struct FileBrowser {
     selected: usize,
     filter: String,
     filtering: bool,
+    browser_mode: FileBrowserMode,
 }
 
 impl FileBrowser {
-    fn new(start: std::path::PathBuf) -> Self {
+    fn new(start: std::path::PathBuf, browser_mode: FileBrowserMode) -> Self {
         let mut fb = FileBrowser {
             current_dir: start,
             entries: Vec::new(),
             selected: 0,
             filter: String::new(),
             filtering: false,
+            browser_mode
         };
         fb.refresh();
         fb
@@ -85,11 +97,13 @@ impl FileBrowser {
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
                     .filter(|p| {
-                        p.is_dir()
-                            || p.extension()
-                                .and_then(|e| e.to_str())
-                                .map(|e| e == "bib")
-                                .unwrap_or(false)
+                        p.is_dir() || p.extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| match self.browser_mode {
+                                FileBrowserMode::Bib => e == "bib",
+                                FileBrowserMode::Pdf => e == "pdf",
+                            })
+                            .unwrap_or(false)
                     })
                     .collect();
                 // Dirs first, then files, both sorted alphabetically
@@ -155,7 +169,6 @@ struct App {
     references: Vec<Entry>,
     selected_reference: usize,
     mode: Mode,
-    // search_mode: bool,
     search_query: String,
     new_project_name: String,
     new_ref: String,
@@ -169,6 +182,8 @@ struct App {
     project_scroll: usize,
     ref_scroll: usize,
     detail_scroll: usize,
+    pending_pdf_path: Option<std::path::PathBuf>,
+    pdf_doi_input: String,
 }
 
 enum Mode {
@@ -182,6 +197,7 @@ enum Mode {
     RenameProject,
     ConfirmDelete,
     ConfirmRemoveRef,
+    PdfDoi,
 }
 
 impl App {
@@ -201,7 +217,6 @@ impl App {
             references: Vec::new(),
             selected_reference: 0,
             mode: Mode::Normal,
-            // search_mode: false,
             search_query: String::new(),
             new_project_name: String::new(),
             new_ref: String::new(),
@@ -215,7 +230,8 @@ impl App {
             project_scroll: 0,
             ref_scroll: 0,
             detail_scroll: 0,
-
+            pending_pdf_path: None,
+            pdf_doi_input: String::new(),
         }
     }
 
@@ -739,6 +755,7 @@ fn main() -> anyhow::Result<()> {
                     "  D             Delete reference from project",
                     "  e             Edit reference in $EDITOR",
                     "  F             Re-fetch missing metadata from Crossref",
+                    "  P             Import PDF and link to reference",
                     "  Enter         Open PDF (if available)",
                     "",
                     "  SEARCH",
@@ -884,6 +901,37 @@ fn main() -> anyhow::Result<()> {
                 .style(Style::default().fg(Color::Black).bg(mode_color));
             
             f.render_widget(status, vchunks[2]);
+
+            if matches!(app.mode, Mode::PdfDoi) {
+                let size = f.size();
+                let area = Rect {
+                    x: size.width / 4,
+                    y: size.height / 2 - 3,
+                    width: size.width / 2,
+                    height: 5,
+                };
+            
+                f.render_widget(Clear, area);
+            
+                let filename = app.pending_pdf_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+            
+                let text = format!("PDF: {}\nDOI: {}", filename, app.pdf_doi_input);
+            
+                let input = Paragraph::new(text)
+                    .block(
+                        Block::default()
+                            .title(" No DOI found — enter manually ")
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Yellow)),
+                    );
+            
+                f.render_widget(input, area);
+            }
+
 
         })?;
 
@@ -1240,7 +1288,7 @@ fn main() -> anyhow::Result<()> {
                     KeyCode::Char('I') if matches!(app.mode, Mode::Normal) => {
                         //let start = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
                         let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                        app.file_browser = Some(FileBrowser::new(start));
+                        app.file_browser = Some(FileBrowser::new(start, FileBrowserMode::Bib));
                         app.mode = Mode::FileBrowser;
                     }
 
@@ -1310,35 +1358,93 @@ fn main() -> anyhow::Result<()> {
                         let selected_file = app.file_browser.as_mut().and_then(|fb| fb.enter());
                     
                         if let Some(path) = selected_file {
-                            let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
-                            let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+                            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                     
-                            match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
-                                Ok(keys) if keys.is_empty() => {
-                                    app.show_alert("No new entries found (all already exist)");
-                                }
-                                Ok(keys) => {
-                                    let current_project = app.projects[app.selected_project].clone();
-                                    if current_project != "all" {
-                                        for key in &keys {
-                                            let _ = add_to_project(&proj_map_path, &current_project, key);
+                            match ext {
+                                "bib" => {
+                                    // existing .bib import logic unchanged
+                                    let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                                    let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+                    
+                                    match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
+                                        Ok(keys) if keys.is_empty() => {
+                                            app.show_alert("No new entries found (all already exist)");
                                         }
-                                        app.show_alert(&format!(
-                                            "Imported {} entries into '{}' and all.bib",
-                                            keys.len(), current_project
-                                        ));
-                                    } else {
-                                        app.show_alert(&format!("Imported {} entries into all.bib", keys.len()));
+                                        Ok(keys) => {
+                                            let current_project = app.projects[app.selected_project].clone();
+                                            if current_project != "all" {
+                                                for key in &keys {
+                                                    let _ = add_to_project(&proj_map_path, &current_project, key);
+                                                }
+                                                app.show_alert(&format!(
+                                                    "Imported {} entries into '{}' and all.bib",
+                                                    keys.len(), current_project
+                                                ));
+                                            } else {
+                                                app.show_alert(&format!("Imported {} entries into all.bib", keys.len()));
+                                            }
+                                            app.load_references();
+                                        }
+                                        Err(e) => app.show_alert(&format!("Import failed: {e}")),
                                     }
-                                    app.load_references();
-                                }
-                                Err(e) => app.show_alert(&format!("Import failed: {e}")),
-                            }
                     
-                            app.file_browser = None;
-                            app.mode = Mode::Normal;
+                                    app.file_browser = None;
+                                    app.mode = Mode::Normal;
+                                }
+                    
+                                "pdf" => {
+                                    let pdf_path = path.to_string_lossy().to_string();
+                                    app.suspend_tui().ok();
+                                    println!("Extracting DOI from PDF...");
+                                    let doi = extract_doi_from_pdf(&pdf_path);
+                                    app.resume_tui().ok();
+                                    terminal.clear().ok();
+                    
+                                    app.file_browser = None;
+                    
+                                    match doi {
+                                        Some(doi) => {
+                                            // Try to add (handles dedup internally)
+                                            let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                                            let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+                    
+                                            app.suspend_tui().ok();
+                                            println!("Fetching metadata for DOI: {doi}...");
+                                            let result = add_reference(&all_bib_path, &doi);
+                                            app.resume_tui().ok();
+                                            terminal.clear().ok();
+                    
+                                            match result {
+                                                Ok(key) => {
+                                                    let current = app.projects[app.selected_project].clone();
+                                                    if current != "all" {
+                                                        let _ = add_to_project(&proj_map_path, &current, &key);
+                                                    }
+                                                    let _ = link_pdf_to_entry(&all_bib_path, &key, &pdf_path);
+                                                    app.load_references();
+                                                    if let Some(idx) = app.references.iter().position(|e| e.key == key) {
+                                                        app.selected_reference = idx;
+                                                    }
+                                                    app.show_alert(&format!("Linked PDF to '{}'", key));
+                                                }
+                                                Err(e) => app.show_alert(&format!("Failed: {e}")),
+                                            }
+                                            app.mode = Mode::Normal;
+                                        }
+                                        None => {
+                                            // No DOI found — ask user to enter one
+                                            app.pending_pdf_path = Some(path);
+                                            app.pdf_doi_input.clear();
+                                            app.mode = Mode::PdfDoi;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    app.file_browser = None;
+                                    app.mode = Mode::Normal;
+                                }
+                            }
                         }
-                        // If enter was on a dir, FileBrowser::enter() already navigated — stay in mode
                     }
                     
                     KeyCode::Esc if matches!(app.mode, Mode::FileBrowser) => {
@@ -1411,6 +1517,13 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     
+                    KeyCode::Char('P') if matches!(app.mode, Mode::Normal) => {
+                        let start = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                        app.file_browser = Some(FileBrowser::new(start, FileBrowserMode::Pdf));
+                        app.mode = Mode::FileBrowser;
+                    }
+
                     KeyCode::Char(c) if matches!(app.mode, Mode::RenameProject) => {
                         app.rename_project_name.push(c);
                     }
@@ -1482,8 +1595,54 @@ fn main() -> anyhow::Result<()> {
                         app.show_alert("Delete cancelled");
                         app.mode = Mode::Normal;
                     }
-                    
 
+                    KeyCode::Char(c) if matches!(app.mode, Mode::PdfDoi) => {
+                        app.pdf_doi_input.push(c);
+                    }
+                    
+                    KeyCode::Backspace if matches!(app.mode, Mode::PdfDoi) => {
+                        app.pdf_doi_input.pop();
+                    }
+                    
+                    KeyCode::Esc if matches!(app.mode, Mode::PdfDoi) => {
+                        app.pending_pdf_path = None;
+                        app.pdf_doi_input.clear();
+                        app.mode = Mode::Normal;
+                    }
+                    
+                    KeyCode::Enter if matches!(app.mode, Mode::PdfDoi) => {
+                        let doi = app.pdf_doi_input.trim().to_string();
+                        if !doi.is_empty() {
+                            if let Some(pdf_path) = app.pending_pdf_path.take() {
+                                let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                                let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+                                let pdf_str = pdf_path.to_string_lossy().to_string();
+                    
+                                app.suspend_tui().ok();
+                                println!("Fetching metadata for DOI: {doi}...");
+                                let result = add_reference(&all_bib_path, &doi);
+                                app.resume_tui().ok();
+                                terminal.clear().ok();
+                    
+                                match result {
+                                    Ok(key) => {
+                                        let current = app.projects[app.selected_project].clone();
+                                        if current != "all" {
+                                            let _ = add_to_project(&proj_map_path, &current, &key);
+                                        }
+                                        let _ = link_pdf_to_entry(&all_bib_path, &key, &pdf_str);
+                                        app.load_references();
+                                        if let Some(idx) = app.references.iter().position(|e| e.key == key) {
+                                            app.selected_reference = idx;
+                                        }
+                                        app.show_alert(&format!("Linked PDF to '{}'", key));
+                                    }
+                                    Err(e) => app.show_alert(&format!("Failed: {e}")),
+                                }
+                            }
+                        }
+                        app.mode = Mode::Normal;
+                    }
 
                     _ => {}
                 }
