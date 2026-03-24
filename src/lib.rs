@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::Deserialize;
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
@@ -16,23 +16,6 @@ use crossterm::{
 use std::io;
 use std::process::Command;
 use std::collections::HashMap;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Reference {
-    pub title: String,
-    pub authors: Vec<String>,
-    pub year: Option<u32>,
-    pub doi: Option<String>,
-    pub abstract_text: Option<String>,
-    pub journal: Option<String>,
-    pub volume: Option<String>,
-    pub number: Option<String>,
-    pub pages: Option<String>,
-    pub issn: Option<String>,
-    //pub isbn: Option<String>,
-    pub publisher: Option<String>,
-    //pub pdf: Option<String>,  // relative path to pdf if available
-}
 
 fn field<S: AsRef<str>>(s: S) -> Vec<Spanned<Chunk>> {
     vec![Spanned::detached(Chunk::Normal(s.as_ref().to_string()))]
@@ -58,9 +41,6 @@ pub fn authors_to_string(authors: Vec<biblatex::Person>) -> String {
         .map(|p| {
             match (&p.name, &p.given_name) {
                 (g, f) => format!("- {g} {f}"),
-                // (String::new(), f) => f.clone(),
-                // (g, "") => g.clone(),
-                // ("", "") => "<unknown>".to_string(),
             }
         })
         .collect::<Vec<_>>()
@@ -123,14 +103,6 @@ pub fn pages_string(
     }
 }
 
-// pub fn load_project(path: &str) -> Result<Vec<String>> {
-//     if !std::path::Path::new(path).exists() {
-//         return Ok(vec![]);
-//     }
-//     let content = fs::read_to_string(path)?;
-//     Ok(serde_json::from_str(&content)?)
-// }
-
 pub fn load_projects_map(path: &str) -> Result<ProjectsMap> {
     if !std::path::Path::new(path).exists() {
         return Ok(HashMap::new());
@@ -139,24 +111,10 @@ pub fn load_projects_map(path: &str) -> Result<ProjectsMap> {
     Ok(serde_json::from_str(&content)?)
 }
 
-// pub fn save_project(path: &str, keys: &[String]) -> Result<()> {
-//     fs::write(path, serde_json::to_string_pretty(keys)?)?;
-//     Ok(())
-// }
-
 pub fn save_projects_map(path: &str, map: &ProjectsMap) -> Result<()> {
     fs::write(path, serde_json::to_string_pretty(map)?)?;
     Ok(())
 }
-
-// pub fn add_to_project(proj_path: &str, key: &str) -> Result<()> {
-//     let mut keys = load_project(proj_path)?;
-//     if !keys.contains(&key.to_string()) {
-//         keys.push(key.to_string());
-//         save_project(pro, &keys)?;
-//     }
-//     Ok(())
-// }
 
 pub fn add_to_project(proj_map_path: &str, project: &str, key: &str) -> Result<()> {
     let mut map = load_projects_map(proj_map_path)?;
@@ -167,12 +125,6 @@ pub fn add_to_project(proj_map_path: &str, project: &str, key: &str) -> Result<(
     }
     Ok(())
 }
-
-// pub fn remove_from_project(proj_path: &str, key: &str) -> Result<()> {
-//     let mut keys = load_project(proj_path)?;
-//     keys.retain(|k| k != key);
-//     save_project(proj_path, &keys)
-// }
 
 pub fn remove_from_project(proj_map_path: &str, project: &str, key: &str) -> Result<()> {
     let mut map = load_projects_map(proj_map_path)?;
@@ -205,7 +157,6 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
             .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url)) 
             .unwrap_or(false)
     }){
-        // println!("⚠️ DOI already exists: {doi_url}");
         return Ok(existing.key.clone());
     }
 
@@ -289,7 +240,6 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
 
     entry.set("title", field(title));
     entry.set("author", field(authors.join(" and ")));
-    // entry.set("year", field(&year));
     entry.set("date", field(&year));
     entry.set("journal", field(journal));
     entry.set("volume", field(&volume));
@@ -331,7 +281,6 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     // fs::write(&all_bib, bib.to_bibtex_string())?;
     fs::write(&all_bib, bib.to_biblatex_string())?;
 
-    //println!("✅ Added {doi} to project {project}");
     Ok(key)
 }
 
@@ -415,64 +364,3 @@ pub fn load_config() -> Config {
     toml::from_str(&contents)
         .expect("Invalid config file")
 }
-
-// pub fn entry_to_reference(entry: &Entry) -> Reference {
-//     let title = entry.get("title")
-//         .map(|c| chunks_to_string(c))
-//         .unwrap_or_default();
-// 
-//     let authors = entry.author().ok()
-//         .map(|authors| authors.iter().map(|a| {
-//             format!("{} {}", a.given_name, a.name).trim().to_string()
-//         }).collect())
-//         .unwrap_or_default();
-// 
-//     let year = entry.date().ok()
-//         .and_then(|d| date_to_year_string(d))
-//         .and_then(|s| s.parse().ok());
-// 
-//     let doi = entry.get("doi").map(|c| chunks_to_string(c));
-//     let abstract_text = entry.get("abstract").map(|c| chunks_to_string(c));
-//     let journal = entry.get("journal").map(|c| chunks_to_string(c));
-//     let volume = entry.get("volume").map(|c| chunks_to_string(c));
-//     let number = entry.get("issue").map(|c| chunks_to_string(c));
-//     let pages = entry.get("pages").map(|c| chunks_to_string(c));
-//     let issn = entry.get("issn").map(|c| chunks_to_string(c));
-//     let publisher = entry.get("publisher").map(|c| chunks_to_string(c));
-// 
-//     Reference {
-//         title,
-//         authors,
-//         year,
-//         doi,
-//         abstract_text,
-//         journal,
-//         volume,
-//         number,
-//         pages,
-//         issn,
-//         publisher,
-//     }
-// }
-
-// pub fn load_or_create_config() -> Config {
-//     let config_dir = dirs::config_dir().unwrap().join("refman");
-//     let config_path = config_dir.join("config.toml");
-// 
-//     if !config_path.exists() {
-//         std::fs::create_dir_all(&config_dir).unwrap();
-// 
-//         let default = r#"
-// projects_dir = "~/refman/projects"
-// pdfs_dir = "~/refman/pdfs"
-// "#;
-// 
-//         std::fs::write(&config_path, default).unwrap();
-// 
-//         panic!("Config created at {:?}. Please edit it.", config_path);
-//     }
-// 
-//     let contents = std::fs::read_to_string(config_path).unwrap();
-//     toml::from_str(&contents).unwrap()
-// }
-

@@ -46,7 +46,7 @@ struct App {
     references: Vec<Entry>,
     selected_reference: usize,
     mode: Mode,
-    search_mode: bool,
+    // search_mode: bool,
     search_query: String,
     new_project_name: String,
     new_ref: String,
@@ -54,6 +54,7 @@ struct App {
     alert_message: Option<String>,
     alert_timer: Option<std::time::Instant>,
     list_state: ListState,
+    moving_target: usize,
 }
 
 enum Mode {
@@ -61,6 +62,7 @@ enum Mode {
     Search,
     NewProject,
     Adding,
+    Moving,
 }
 
 impl App {
@@ -80,7 +82,7 @@ impl App {
             references: Vec::new(),
             selected_reference: 0,
             mode: Mode::Normal,
-            search_mode: false,
+            // search_mode: false,
             search_query: String::new(),
             new_project_name: String::new(),
             new_ref: String::new(),
@@ -88,6 +90,7 @@ impl App {
             alert_message: None,
             alert_timer: None,
             list_state: ListState::default(),
+            moving_target: 0,
         }
     }
 
@@ -119,32 +122,6 @@ impl App {
         refs.sort_by(|a, b| a.key.cmp(&b.key));
         self.references = refs;
         self.selected_reference = 0;
-
-        // if let Some(project) = self.projects.get(self.selected_project) {
-        //     let proj_map_path = self.config.projects_file.to_string_lossy().to_string();
-        //     let all_bib_path = self.config.all_bib.to_string_lossy().to_string();
-
-        //     let map: ProjectsMap = fs::read_to_string(&proj_map_path)
-        //         .ok()
-        //         .and_then(|data| serde_json::from_str(&data).ok())
-        //         .unwrap_or_default();
-
-        //     let keys = map.get(project.as_str()).cloned().unwrap_or_default();
-
-        //     let bib = fs::read_to_string(&all_bib_path)
-        //         .ok()
-        //         .and_then(|content| Bibliography::parse(&content).ok())
-        //         .unwrap_or_default();
-
-        //     let mut refs: Vec<Entry> = keys.iter()
-        //         .filter_map(|key| bib.get(key))
-        //         .cloned()
-        //         .collect();
-
-        //     refs.sort_by(|a, b| a.key.cmp(&b.key));
-        //     self.references = refs;
-        //     self.selected_reference = 0;
-        // }
     }
 
     fn clear_filtered_refs(&mut self) {
@@ -153,7 +130,7 @@ impl App {
 
     fn enter_search_mode(&mut self) {
         self.mode = Mode::Search;
-        self.search_mode = true;
+        // self.search_mode = true;
         self.search_query.clear();
     }
 
@@ -174,7 +151,7 @@ impl App {
             .collect();
 
         self.selected_reference = 0;
-        self.search_mode = false;
+        // self.search_mode = false;
         self.mode = Mode::Normal;
     }
 
@@ -204,15 +181,6 @@ impl App {
         Ok(())
     }
 
-    /// Create a new project in projects_file (empty list).
-    //fn new_project(&self, project: &str) -> Result<()> {
-    //    fs::create_dir_all(&self.config.projects_dir)?;
-    //    let proj_file = format!("{}/{}.json", self.config.projects_dir.display(), project);
-    //    if !Path::new(&proj_file).exists() {
-    //        fs::write(&proj_file, "")?;
-    //    }
-    //    Ok(())
-    //}
     fn new_project(&self, project: &str) -> Result<()> {
         if project == "all" {
             anyhow::bail!("'all' is a reserved project name");
@@ -332,7 +300,7 @@ fn main() -> anyhow::Result<()> {
             f.render_widget(ref_para, panels[2]);
 
             // Bottom: search box (vchunks[1])
-            let search_text = if app.search_mode {
+            let search_text = if matches!(app.mode, Mode::Search) {
                 format!("/{}", app.search_query)
             } else if !app.filtered_refs.is_empty() {
                 // show active filter
@@ -365,48 +333,81 @@ fn main() -> anyhow::Result<()> {
 
             if matches!(app.mode, Mode::NewProject) {
                 let size = f.size();
-            
+
                 let area = Rect {
                     x: size.width / 4,
                     y: size.height / 2 - 2,
                     width: size.width / 2,
                     height: 3,
                 };
-            
+
                 f.render_widget(Clear, area);
-            
+
                 let input = Paragraph::new(app.new_project_name.as_str())
                     .block(
                         Block::default()
                             .title("New Project Name")
                             .borders(Borders::ALL),
                     );
-            
+
                 f.render_widget(input, area);
             }
 
             if matches!(app.mode, Mode::Adding) {
                 let size = f.size();
-            
+
                 let area = Rect {
                     x: size.width / 4,
                     y: size.height / 2 - 2,
                     width: size.width / 2,
                     height: 3,
                 };
-            
+
                 f.render_widget(Clear, area);
-            
+
                 let input = Paragraph::new(app.new_ref.as_str())
                     .block(
                         Block::default()
                             .title("New reference DOI")
                             .borders(Borders::ALL),
                     );
-            
+
                 f.render_widget(input, area);
             }
 
+            if matches!(app.mode, Mode::Moving) {
+                let targets: Vec<String> = app.projects.iter()
+                    .filter(|p| p.as_str() != "all")
+                    .cloned()
+                    .collect();
+
+                let items: Vec<ListItem> = targets.iter().enumerate().map(|(i, p)| {
+                    let style = if i == app.moving_target {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(p.as_str()).style(style)
+                }).collect();
+
+                let size = f.size();
+                let height = (targets.len() as u16 + 2).min(size.height / 2);
+                let area = Rect {
+                    x: size.width / 4,
+                    y: size.height / 2 - height / 2,
+                    width: size.width / 2,
+                    height,
+                };
+
+                let block = Block::default()
+                    .title(" Copy to project (↑↓ navigate, Enter confirm, Esc cancel) ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow));
+
+                let list = List::new(items).block(block);
+                f.render_widget(Clear, area);
+                f.render_widget(list, area);
+            }
 
         })?;
 
@@ -416,18 +417,25 @@ fn main() -> anyhow::Result<()> {
                     KeyCode::Char('q') if matches!(app.mode, Mode::Normal) => break,
 
                     // Typing during search
-                    KeyCode::Char(c) if app.search_mode => {
+                    KeyCode::Char(c) if matches!(app.mode, Mode::Search) => {
                         app.search_query.push(c);
                     }
 
                     // Backspace during search
-                    KeyCode::Backspace if app.search_mode => {
+                    KeyCode::Backspace if matches!(app.mode, Mode::Search) => {
                         app.search_query.pop();
                     }
 
                     // Cancel search
                     KeyCode::Esc if matches!(app.mode, Mode::Search) => {
-                        app.search_mode = false;
+                        // app.search_mode = false;
+                        app.search_query.clear();
+                        app.clear_filtered_refs();
+                        app.mode = Mode::Normal;
+                    }
+
+                    KeyCode::Esc if matches!(app.mode, Mode::Normal) => {
+                        // app.search_mode = false;
                         app.search_query.clear();
                         app.clear_filtered_refs();
                     }
@@ -469,34 +477,45 @@ fn main() -> anyhow::Result<()> {
                                 app.show_alert(&format!("Project {} already exists!", app.new_project_name));
                             }
                         }
-                    
+
                         app.mode = Mode::Normal;
                     }
 
                     KeyCode::Enter if matches!(app.mode, Mode::Adding) => {
                         if !app.new_ref.is_empty() {
                             let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                            let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
 
-                            let key = add_reference(&all_bib_path, &app.new_ref)?;
+                            app.suspend_tui().ok();
+                            println!("Fetching {}...", app.new_ref);
 
-                            add_to_project(&all_bib_path, &app.projects[app.selected_project], &key)?;
+                            let result = add_reference(&all_bib_path, &app.new_ref);
 
-                            // let _ = add_reference(&app.projects[app.selected_project], &app.new_ref);  // you already import this
-                            app.load_references();
+                            app.resume_tui().ok();
+                            terminal.clear().ok();
+                            
+                            match result {
+                                Ok(key) => {
+                                    add_to_project(&proj_map_path, &app.projects[app.selected_project], &key)?;
+                                    app.load_references();
+                                }
+                                Err(e) => app.show_alert(&format!("Failed: {e}")),
+                            }
+
                         }
-                    
+
                         app.mode = Mode::Normal;
                     }
 
                     
                     // Navigation
-                    KeyCode::Up | KeyCode::Char('k') => {
+                    KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::Normal) => {
                         if app.selected_reference > 0 {
                             app.selected_reference -= 1;
                         }
                     }
 
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Down | KeyCode::Char('j') if matches!(app.mode, Mode::Normal) => {
                         let active_refs = if !app.filtered_refs.is_empty() {
                             &app.filtered_refs
                         } else {
@@ -507,7 +526,7 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    KeyCode::Left | KeyCode::Char('h') => {
+                    KeyCode::Left | KeyCode::Char('h') if matches!(app.mode, Mode::Normal) => {
                         if app.selected_project > 0 {
                             app.selected_project -= 1;
                             app.load_references();
@@ -515,13 +534,59 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    KeyCode::Right | KeyCode::Char('l') => {
+                    KeyCode::Right | KeyCode::Char('l') if matches!(app.mode, Mode::Normal) => {
                         if app.selected_project + 1 < app.projects.len() {
                             app.selected_project += 1;
                             app.load_references();
                             app.clear_filtered_refs();
                         }
                     }
+
+                    KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::Moving) => {
+                        if app.moving_target > 0 {
+                            app.moving_target -= 1;
+                        }
+                    }
+
+                    KeyCode::Down | KeyCode::Char('j') if matches!(app.mode, Mode::Moving) => {
+                        // Exclude "all" (index 0) from targets
+                        let targets: Vec<&String> = app.projects.iter().filter(|p| p.as_str() != "all").collect();
+                        if app.moving_target + 1 < targets.len() {
+                            app.moving_target += 1;
+                        }
+                    }
+
+                    KeyCode::Esc if matches!(app.mode, Mode::Moving) => {
+                        app.mode = Mode::Normal;
+                    }
+                    
+                    KeyCode::Enter if matches!(app.mode, Mode::Moving) => {
+                        let targets: Vec<String> = app.projects.iter()
+                            .filter(|p| p.as_str() != "all")
+                            .cloned()
+                            .collect();
+
+                        if let Some(target_project) = targets.get(app.moving_target) {
+                            let active_refs = if !app.filtered_refs.is_empty() {
+                                &app.filtered_refs
+                            } else {
+                                &app.references
+                            };
+
+                            if let Some(entry) = active_refs.get(app.selected_reference) {
+                                let key = entry.key.clone();
+                                let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+
+                                match add_to_project(&proj_map_path, target_project, &key) {
+                                    Ok(_) => app.show_alert(&format!("Copied '{}' to '{}'", key, target_project)),
+                                    Err(e) => app.show_alert(&format!("Failed: {e}")),
+                                }
+                            }
+                        }
+
+                        app.mode = Mode::Normal;
+                    }
+
 
                     // 🔍 Enter search mode
                     KeyCode::Char('/') => {
@@ -530,7 +595,7 @@ fn main() -> anyhow::Result<()> {
 
                     // ⏎ Apply search OR open PDF
                     KeyCode::Enter => {
-                        if app.search_mode {
+                        if matches!(app.mode, Mode::Search) {
                             app.apply_search();
                         } else {
                             // Open PDF if available
@@ -594,7 +659,7 @@ fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
-                    
+
                             app.load_references();
                         }
                     }
@@ -608,6 +673,15 @@ fn main() -> anyhow::Result<()> {
                         app.mode = Mode::Adding;
                         app.new_ref.clear();
                     }
+
+                    KeyCode::Char('M') => {
+                        // Only makes sense if a reference is selected
+                        if !app.references.is_empty() {
+                            app.mode = Mode::Moving;
+                            app.moving_target = 0;
+                        }
+                    }
+
 
                     _ => {}
                 }
