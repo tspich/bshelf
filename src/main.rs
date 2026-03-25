@@ -186,6 +186,7 @@ struct App {
     pending_pdf_path: Option<std::path::PathBuf>,
     pdf_doi_input: String,
     clipboard: Option<arboard::Clipboard>,
+    help_scroll: usize,
 }
 
 enum Mode {
@@ -235,6 +236,7 @@ impl App {
             pending_pdf_path: None,
             pdf_doi_input: String::new(),
             clipboard: arboard::Clipboard::new().ok(),
+            help_scroll: 0,
         }
     }
 
@@ -741,6 +743,8 @@ fn main() -> anyhow::Result<()> {
                 };
             
                 let help_text = vec![
+                    "  Press Esc, q or H to close   j/k to scroll",
+                    "",
                     "  NAVIGATION",
                     "  ──────────────────────────────────────",
                     "  h / ←        Previous project",
@@ -773,23 +777,46 @@ fn main() -> anyhow::Result<()> {
                     "  ──────────────────────────────────────",
                     "  H             Toggle this help screen",
                     "  q             Quit",
-                    "",
-                    "  Press Esc, q or H to close",
                 ];
             
                 let text = help_text.join("\n");
-            
+
+                // Clamp scroll so it never scrolls past the end
+                let total_lines = help_text.len() as u16;
+                let visible_lines = area.height.saturating_sub(2); // minus borders
+                let max_scroll = total_lines.saturating_sub(visible_lines) as usize;
+                let scroll = app.help_scroll.min(max_scroll);
+
+                let title = if total_lines > visible_lines {
+                    format!(" Help ({}/{}) ", scroll + 1, max_scroll + 1)
+                } else {
+                    " Help ".to_string()
+                };
+
                 let paragraph = Paragraph::new(text)
                     .block(
                         Block::default()
-                            .title(" Help ")
+                            .title(title)
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::Yellow)),
                     )
-                    .style(Style::default().fg(Color::White));
-            
+                    .style(Style::default().fg(Color::White))
+                    .scroll((scroll as u16, 0));
+
                 f.render_widget(Clear, area);
                 f.render_widget(paragraph, area);
+            
+                //let paragraph = Paragraph::new(text)
+                //    .block(
+                //        Block::default()
+                //            .title(" Help ")
+                //            .borders(Borders::ALL)
+                //            .border_style(Style::default().fg(Color::Yellow)),
+                //    )
+                //    .style(Style::default().fg(Color::White));
+            
+                //f.render_widget(Clear, area);
+                //f.render_widget(paragraph, area);
             }
 
             if matches!(app.mode, Mode::RenameProject) {
@@ -936,7 +963,6 @@ fn main() -> anyhow::Result<()> {
             
                 f.render_widget(input, area);
             }
-
 
         })?;
 
@@ -1462,6 +1488,7 @@ fn main() -> anyhow::Result<()> {
                     }
 
                     KeyCode::Char('H') if matches!(app.mode, Mode::Normal) => {
+                        app.help_scroll = 0;
                         app.mode = Mode::Help;
                     }
                     
@@ -1672,6 +1699,14 @@ fn main() -> anyhow::Result<()> {
                                 None => app.show_alert("Clipboard not available"),
                             }
                         }
+                    }
+
+                    KeyCode::Char('j') | KeyCode::Down if matches!(app.mode, Mode::Help) => {
+                        app.help_scroll = app.help_scroll.saturating_add(1);
+                    }
+                    
+                    KeyCode::Char('k') | KeyCode::Up if matches!(app.mode, Mode::Help) => {
+                        app.help_scroll = app.help_scroll.saturating_sub(1);
                     }
 
                     _ => {}
