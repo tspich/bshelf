@@ -288,7 +288,7 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
 
     if let Some(url) = up["best_oa_location"]["url_for_pdf"].as_str() {
         fs::create_dir_all("pdfs")?;
-        let filename = doi.replace("/", "_") + ".pdf";
+        let filename = doi.replace("/", "-") + ".pdf";
         let path = format!("pdfs/{filename}");
 
         let resp = blocking::get(url)?;
@@ -580,21 +580,32 @@ pub fn extract_doi_from_pdf(pdf_path: &str) -> Option<String> {
         .map(|m| m.as_str().trim_end_matches('.').to_string())
 }
 
-pub fn link_pdf_to_entry(all_bib_path: &str, key: &str, pdf_path: &str) -> Result<()> {
+pub fn link_pdf_to_entry(all_bib_path: &str, pdfs_dir: &str, key: &str, pdf_path: &str) -> Result<()> {
     let content = fs::read_to_string(all_bib_path)?;
     let mut bib = Bibliography::parse(&content)?;
 
     let entry = bib.get_mut(key)
         .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))?;
 
-    // Only set if not already linked
-    let already_linked = entry.get("file")
-        .map(|c| !chunks_to_string(c).is_empty())
-        .unwrap_or(false);
+    // Get DOI to use as filename
+    let doi = entry.get("doi")
+        .map(|c| chunks_to_string(c))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("No DOI found for '{}'", key))?;
 
-    if !already_linked {
-        entry.set("file", field(pdf_path));
-        fs::write(all_bib_path, bib.to_biblatex_string())?;
+    // Sanitize DOI for use as filename
+    let filename = doi
+        .strip_prefix("https://doi.org/")
+        .or_else(|| doi.strip_prefix("http://doi.org/"))
+        .unwrap_or(&doi)
+        .replace('/', "-");
+
+    fs::create_dir_all(pdfs_dir)?;
+    let dest = std::path::PathBuf::from(pdfs_dir).join(format!("{filename}.pdf"));
+
+    // Only copy if not already there
+    if !dest.exists() {
+        fs::copy(pdf_path, &dest)?;
     }
 
     Ok(())

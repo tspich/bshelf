@@ -1420,7 +1420,11 @@ fn main() -> anyhow::Result<()> {
                                                     if current != "all" {
                                                         let _ = add_to_project(&proj_map_path, &current, &key);
                                                     }
-                                                    let _ = link_pdf_to_entry(&all_bib_path, &key, &pdf_path);
+                                                    let pdfs_dir = app.config.pdfs_dir.to_string_lossy().to_string();
+                                                    match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_path) {
+                                                        Ok(_) => app.show_alert(&format!("Linked PDF to '{}'", key)),
+                                                        Err(e) => app.show_alert(&format!("PDF copy failed: {e}")),
+                                                    }
                                                     app.load_references();
                                                     if let Some(idx) = app.references.iter().position(|e| e.key == key) {
                                                         app.selected_reference = idx;
@@ -1630,7 +1634,11 @@ fn main() -> anyhow::Result<()> {
                                         if current != "all" {
                                             let _ = add_to_project(&proj_map_path, &current, &key);
                                         }
-                                        let _ = link_pdf_to_entry(&all_bib_path, &key, &pdf_str);
+                                        let pdfs_dir = app.config.pdfs_dir.to_string_lossy().to_string();
+                                        match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str) {
+                                            Ok(_) => app.show_alert(&format!("Linked PDF to '{}'", key)),
+                                            Err(e) => app.show_alert(&format!("PDF copy failed: {e}")),
+                                        }
                                         app.load_references();
                                         if let Some(idx) = app.references.iter().position(|e| e.key == key) {
                                             app.selected_reference = idx;
