@@ -1,12 +1,12 @@
 # bshelf
 
+![Rust](https://img.shields.io/badge/rust-stable-orange)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
 A terminal-based reference manager built with 
 [Ratatui](https://github.com/ratatui-org/ratatui). 
 Manage your BibLaTeX library, organize references into projects, fetch metadata
 from Crossref, and open PDFs — all without leaving the terminal.
-
-![Rust](https://img.shields.io/badge/rust-stable-orange)
-![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
@@ -101,10 +101,10 @@ projects_file = "~/.local/share/bshelf/projects.json"
 │               │                       │ Year: 1859                          │
 │               │                       │ Journal: ...                        │
 ├───────────────┴───────────────────────┴─────────────────────────────────────┤
-│ Press / to search                                                            │
-├──────────────────────────────────────────────────────────────────────────────┤
+│ Press / to search                                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
 │ NORMAL  📁 physics                                                  3 refs  │
-└──────────────────────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -197,8 +197,3 @@ Both `I` and `P` open a file browser filtered to the relevant file type (`.bib` 
 
 References are never duplicated in `all.bib` — projects only store keys.
 
----
-
-## License
-
-MIT
