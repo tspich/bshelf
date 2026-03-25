@@ -49,6 +49,10 @@ use bshelf::{
 //  - Need an alert that new ref was added with which key. could also jump to that key, when added
 //  with DOI
 //  - Get DOI from PDF can be very tedious, need to be careful
+//  - make search show results on the fly
+//  - Add 'G' to jump at the end of the list and 'gg' to jump to the top
+//  - When importing from bib file, should ask, if one want to create a new 
+//  project out of it. 
 //
 
 fn mode_name(mode: &Mode) -> &'static str {
