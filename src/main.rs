@@ -15,6 +15,7 @@ use crossterm::{
 use std::{fs, io};
 // use std::path::Path;
 use anyhow::Result;
+// use arboard::Clipboard;
 
 use bshelf::{
     add_reference,
@@ -184,6 +185,7 @@ struct App {
     detail_scroll: usize,
     pending_pdf_path: Option<std::path::PathBuf>,
     pdf_doi_input: String,
+    clipboard: Option<arboard::Clipboard>,
 }
 
 enum Mode {
@@ -232,6 +234,7 @@ impl App {
             detail_scroll: 0,
             pending_pdf_path: None,
             pdf_doi_input: String::new(),
+            clipboard: arboard::Clipboard::new().ok(),
         }
     }
 
@@ -1652,6 +1655,23 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                         app.mode = Mode::Normal;
+                    }
+
+                    KeyCode::Char('c') if matches!(app.mode, Mode::Normal) => {
+                        let active_refs = if !app.filtered_refs.is_empty() {
+                            &app.filtered_refs
+                        } else {
+                            &app.references
+                        };
+                    
+                        if let Some(entry) = active_refs.get(app.selected_reference) {
+                            let key = entry.key.clone();
+                            match app.clipboard.as_mut().map(|cb| cb.set_text(&key)) {
+                                Some(Ok(_)) => app.show_alert(&format!("Copied '{}' to clipboard", key)),
+                                Some(Err(e)) => app.show_alert(&format!("Clipboard error: {e}")),
+                                None => app.show_alert("Clipboard not available"),
+                            }
+                        }
                     }
 
                     _ => {}
