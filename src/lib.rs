@@ -371,27 +371,6 @@ pub fn open_editor(path: &str, key: &str) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    pub projects_file: PathBuf,
-    pub pdfs_dir: PathBuf,
-    pub all_bib: PathBuf,
-}
-
-pub fn load_config() -> Config {
-    let config_dir = dirs::config_dir()
-        .expect("Could not find config directory")
-        .join("bshelf");
-
-    let config_path = config_dir.join("config.toml");
-
-    let contents = fs::read_to_string(&config_path)
-        .expect("Could not read config file");
-
-    toml::from_str(&contents)
-        .expect("Invalid config file")
-}
-
 pub fn export_project_bib(all_bib_path: &str, proj_map_path: &str, project: &str, output_path: &str) -> Result<()> {
     let content = fs::read_to_string(all_bib_path)?;
     let bib = Bibliography::parse(&content)?;
@@ -609,4 +588,112 @@ pub fn link_pdf_to_entry(all_bib_path: &str, pdfs_dir: &str, key: &str, pdf_path
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub projects_file: PathBuf,
+    pub pdfs_dir: PathBuf,
+    pub all_bib: PathBuf,
+}
+
+// pub fn load_config() -> Config {
+//     let config_dir = dirs::config_dir()
+//         .expect("Could not find config directory")
+//         .join("bshelf");
+// 
+//     let config_path = config_dir.join("config.toml");
+// 
+//     let contents = fs::read_to_string(&config_path)
+//         .expect("Could not read config file");
+// 
+//     toml::from_str(&contents)
+//         .expect("Invalid config file")
+// }
+
+pub fn load_config() -> Config {
+    let config_dir = dirs::config_dir()
+        .expect("Could not find config directory")
+        .join("bshelf");
+
+    let config_path = config_dir.join("config.toml");
+
+    if !config_path.exists() {
+        println!("No config found at {:?}\n", config_path);
+        println!("Let's set up bshelf.\n");
+
+        let all_bib   = prompt("Path to your all.bib file",      "~/.local/share/bshelf/all.bib");
+        let pdfs_dir  = prompt("Path to your PDFs directory",     "~/.local/share/bshelf/pdfs");
+        let proj_file = prompt("Path to your projects.json file", "~/.local/share/bshelf/projects.json");
+
+        let contents = format!(
+            "all_bib = \"{}\"\npdfs_dir = \"{}\"\nprojects_file = \"{}\"\n",
+            all_bib, pdfs_dir, proj_file
+        );
+
+        fs::create_dir_all(&config_dir)
+            .expect("Could not create config directory");
+        fs::write(&config_path, &contents)
+            .expect("Could not write config file");
+
+        println!("\nConfig saved to {:?}", config_path);
+
+        // Create the files/dirs if they don't exist yet
+        let all_bib_expanded   = expand_tilde(&all_bib);
+        let pdfs_dir_expanded  = expand_tilde(&pdfs_dir);
+        let proj_file_expanded = expand_tilde(&proj_file);
+
+        if let Some(parent) = std::path::Path::new(&all_bib_expanded).parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        if !std::path::Path::new(&all_bib_expanded).exists() {
+            fs::write(&all_bib_expanded, "").ok();
+            println!("Created empty all.bib at {}", all_bib_expanded);
+        }
+
+        fs::create_dir_all(&pdfs_dir_expanded).ok();
+        println!("Created PDFs directory at {}", pdfs_dir_expanded);
+
+        if let Some(parent) = std::path::Path::new(&proj_file_expanded).parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        if !std::path::Path::new(&proj_file_expanded).exists() {
+            fs::write(&proj_file_expanded, "{}").ok();
+            println!("Created empty projects.json at {}", proj_file_expanded);
+        }
+
+        println!("\nAll set! Launching bshelf...\n");
+    }
+
+    let contents = fs::read_to_string(&config_path)
+        .expect("Could not read config file");
+
+    toml::from_str(&contents)
+        .expect("Invalid config file")
+}
+
+fn prompt(label: &str, default: &str) -> String {
+    use std::io::Write;
+    print!("{} [{}]: ", label, default);
+    std::io::stdout().flush().unwrap();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let trimmed = input.trim();
+
+    if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") {
+        dirs::home_dir()
+            .map(|h| h.join(&path[2..]).to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string())
+    } else {
+        path.to_string()
+    }
 }

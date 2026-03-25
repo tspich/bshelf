@@ -359,16 +359,18 @@ impl App {
 }
 
 fn main() -> anyhow::Result<()> {
+    let config = load_config();
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let config = load_config();
-
     let mut app = App::new(config);
     app.load_references();
+
+    terminal.clear().ok();
 
     loop {
         // --- draw UI ---
