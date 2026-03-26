@@ -158,16 +158,16 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     let content = fs::read_to_string(&all_bib)?;
     let mut bib = Bibliography::parse(&content)?;
 
-    let doi_url = format!("https://doi.org/{doi}");
+    // let doi_url = format!("https://doi.org/{doi}");
 
-    // 2. Duplicate check
-    if let Some(existing) = bib.iter().find(|e| {
-        e.get("doi")
-            .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url)) 
-            .unwrap_or(false)
-    }){
-        return Ok(existing.key.clone());
-    }
+    // // 2. Duplicate check
+    // if let Some(existing) = bib.iter().find(|e| {
+    //     e.get("doi")
+    //         .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url)) 
+    //         .unwrap_or(false)
+    // }){
+    //     return Ok(existing.key.clone());
+    // }
 
     // 3. Fetch Crossref
     let client = Crossref::builder()
@@ -696,4 +696,31 @@ fn expand_tilde(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
+    let content = std::fs::read_to_string(all_bib_path).ok()?;
+    let bib = biblatex::Bibliography::parse(&content).ok()?;
+
+    // Normalise to bare DOI for comparison
+    // let bare = doi
+    //     .strip_prefix("https://doi.org/")
+    //     .or_else(|| doi.strip_prefix("http://doi.org/"))
+    //     .unwrap_or(doi)
+    //     .to_lowercase();
+
+    bib.iter().find(|e| {
+        e.get("doi")
+            .map(|chunks| {
+                let stored = chunks_to_string(chunks).to_lowercase();
+                // Match whether stored as bare DOI or full URL
+                let stored_bare = stored
+                    .strip_prefix("https://doi.org/")
+                    .or_else(|| stored.strip_prefix("http://doi.org/"))
+                    .unwrap_or(&stored);
+                stored_bare == doi
+            })
+            .unwrap_or(false)
+    })
+    .map(|e| e.key.clone())
 }
