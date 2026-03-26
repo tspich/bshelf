@@ -1,7 +1,7 @@
-# bshelf
-
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
+
+# bshelf
 
 Let reorganize your bookshelf!
 
@@ -150,6 +150,6 @@ References are never duplicated in `all.bib` — projects only store keys.
 
 # Limitations and TODOs
 
-- For now only nvim as editor
-- Keybindings are hard coded, should be configurable through the config file
+- For now only `nvim` as editor.
+- Keybindings are hard coded, should be configurable through the config file.
 - While importing from `.bib` file, keys are taken over. Can be problematic to reuse those in LaTex.
