@@ -3,6 +3,8 @@
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
+Let reorganize your bookshelf!
+
 A terminal-based reference manager built with 
 [Ratatui](https://github.com/ratatui-org/ratatui). 
 Manage your BibLaTeX library, organize references into projects, fetch metadata
@@ -40,25 +42,18 @@ search
 | `pdftotext` | DOI extraction from PDFs (`poppler-utils` on Debian/Ubuntu, `poppler` on Arch/macOS) |
 | `xclip` / `xsel` / `wl-clipboard` | Clipboard support on Linux (X11 or Wayland) |
 
-### Rust
-
-Key crates used: `ratatui`, `crossterm`, `biblatex`, `crossref`, `reqwest`, `arboard`, `serde`, `anyhow`, `dirs`, `toml`, `regex`.
-
 ---
 
 ## Installation
 
+Not deployed so far
+
 ```bash
-git clone https://github.com/yourname/bshelf
+git clone https://github.com/tspich/bshelf
 cd bshelf
-cargo build --release
+cargo install --path .
 ```
-
-The binary will be at `target/release/bshelf`. You can move it somewhere on your `$PATH`:
-
-```bash
-cp target/release/bshelf ~/.local/bin/
-```
+The binary will be at `~/.cargo/bshelf`.
 
 ---
 
@@ -90,25 +85,6 @@ projects_file = "~/.local/share/bshelf/projects.json"
 
 ---
 
-## Layout
-
-```
-┌─ Projects ────┬─ References ──────────┬─ Details ───────────────────────────┐
-│ all           │ smith_2023            │ Title:                              │
-│ > physics     │ > jones_2024          │ On the Origin of Species            │
-│ biology       │ darwin_1859           │ Authors:                            │
-│               │                       │ - Darwin Charles                    │
-│               │                       │ Year: 1859                          │
-│               │                       │ Journal: ...                        │
-├───────────────┴───────────────────────┴─────────────────────────────────────┤
-│ Press / to search                                                           │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ NORMAL  📁 physics                                                  3 refs  │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
 ## Keybindings
 
 ### Navigation
@@ -120,6 +96,8 @@ projects_file = "~/.local/share/bshelf/projects.json"
 | `j` / `↓` | Next reference |
 | `k` / `↑` | Previous reference |
 | `d` / `u` | Scroll details panel down / up |
+| `g`       | Jump to first reference |
+| `G`       | Jump to last reference |
 
 ### Actions
 
@@ -156,33 +134,6 @@ projects_file = "~/.local/share/bshelf/projects.json"
 
 ---
 
-## How it works
-
-### Adding a reference by DOI
-
-Press `A`, type a DOI (e.g. `10.1038/s41586-020-2649-2`), and press Enter. bshelf will:
-
-1. Check for duplicates in `all.bib` by DOI
-2. Fetch metadata from [Crossref](https://www.crossref.org/)
-3. Attempt to download a PDF via [Unpaywall](https://unpaywall.org/)
-4. Generate a citation key (`authorsurname_year`, with `a/b/c` suffixes for duplicates)
-5. Add the entry to `all.bib` and to the current project
-
-### Importing a PDF
-
-Press `P` to open the file browser. Select a `.pdf` file and bshelf will:
-
-1. Run `pdftotext` on the first 3 pages to extract a DOI
-2. If found, fetch metadata from Crossref and add the entry
-3. If not found, prompt you to enter the DOI manually
-4. Copy the PDF to your `pdfs_dir` as `{sanitized_DOI}.pdf`
-
-### File browser
-
-Both `I` and `P` open a file browser filtered to the relevant file type (`.bib` or `.pdf`). Navigate with `j`/`k`, open directories with Enter, press `/` to filter by filename, and `Esc` to cancel.
-
----
-
 ## Data format
 
 - **`all.bib`** — a standard BibLaTeX file containing all references across all projects
@@ -197,3 +148,8 @@ Both `I` and `P` open a file browser filtered to the relevant file type (`.bib` 
 
 References are never duplicated in `all.bib` — projects only store keys.
 
+# Limitations and TODOs
+
+- For now only nvim as editor
+- Keybindings are hard coded, should be configurable through the config file
+- While importing from `.bib` file, keys are taken over. Can be problematic to reuse those in LaTex.

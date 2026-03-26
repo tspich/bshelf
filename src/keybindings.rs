@@ -52,7 +52,7 @@ pub fn help_lines() -> &'static [&'static str] {
         "  e             Edit reference in $EDITOR",
         "  F             Re-fetch missing metadata from Crossref",
         "  P             Import PDF and link to reference",
-        "  c             Copy the current key to a project",
+        "  c             Copy the current key to the clipboard",
         "  X             Delete current project",
         "  Enter         Open PDF (if available)",
         "",
