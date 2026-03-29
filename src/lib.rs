@@ -117,6 +117,9 @@ pub fn load_projects_map(path: &str) -> Result<ProjectsMap> {
         return Ok(HashMap::new());
     }
     let content = fs::read_to_string(path)?;
+    if content.trim().is_empty(){
+        return Ok(HashMap::new());
+    }
     Ok(serde_json::from_str(&content)?)
 }
 
