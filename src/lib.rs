@@ -403,29 +403,41 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
         Bibliography::parse(&all_content)?
     };
 
-    let mut imported_keys = Vec::new();
+    let mut keys = Vec::new();
 
     for entry in import_bib.iter() {
-        // Deduplicate by DOI if present, otherwise by key
-        let already_exists = if let Some(doi_chunks) = entry.get("doi") {
-            let doi = chunks_to_string(doi_chunks);
-            all_bib.iter().any(|e| {
+        // Try to find an existing entry in all.bib:
+        // 1. Match by DOI (normalised) if present
+        // 2. Fall back to matching by key
+        let existing_key = if let Some(doi_chunks) = entry.get("doi") {
+            let doi = chunks_to_string(doi_chunks).to_lowercase();
+            all_bib.iter().find(|e| {
                 e.get("doi")
-                    .map(|c| chunks_to_string(c) == doi)
+                    .map(|c| {
+                        let stored = chunks_to_string(c).to_lowercase();
+                        stored == doi
+                    })
                     .unwrap_or(false)
             })
+            .map(|e| e.key.clone())
         } else {
-            all_bib.get(&entry.key).is_some()
+            all_bib.get(&entry.key).map(|e| e.key.clone())
         };
 
-        if !already_exists {
+        let key = if let Some(k) = existing_key {
+            // Already in all.bib — use the canonical key from all.bib
+            k
+        } else {
+            // Not in all.bib — add it
             all_bib.insert(entry.clone());
-            imported_keys.push(entry.key.clone());
-        }
+            entry.key.clone()
+        };
+
+        keys.push(key);
     }
 
     fs::write(all_bib_path, all_bib.to_biblatex_string())?;
-    Ok(imported_keys)
+    Ok(keys)
 }
 
 pub fn rename_project(proj_map_path: &str, old_name: &str, new_name: &str) -> Result<()> {

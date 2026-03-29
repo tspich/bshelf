@@ -36,6 +36,8 @@ pub enum Mode {
     ConfirmDelete,
     ConfirmRemoveRef,
     PdfDoi,
+    ImportProject,
+    ImportNewProject,
 }
 
 pub fn mode_name(mode: &Mode) -> &'static str {
@@ -51,6 +53,8 @@ pub fn mode_name(mode: &Mode) -> &'static str {
         Mode::ConfirmRemoveRef => "REMOVE REF",
         Mode::Help             => "HELP",
         Mode::PdfDoi           => "PDF",
+        Mode::ImportProject    => "IMPORT TO",
+        Mode::ImportNewProject => "IMPORT NEW PROJECT",
     }
 }
 
@@ -78,7 +82,7 @@ impl FileBrowser {
         let mut fb = FileBrowser {
             current_dir: start,
             entries: Vec::new(),
-            selected: 0,
+            selected: 1,
             filter: String::new(),
             filtering: false,
             browser_mode,
@@ -115,7 +119,7 @@ impl FileBrowser {
 
         entries.insert(0, self.current_dir.join(".."));
         self.entries = entries;
-        self.selected = 0;
+        self.selected = 1;
         self.filter.clear();
         self.filtering = false;
         self.multi_selected.clear();
@@ -199,6 +203,9 @@ pub struct App {
     pub pdf_doi_input: String,
     pub clipboard: Option<arboard::Clipboard>,
     pub help_scroll: usize,
+    pub pending_import_paths: Vec<std::path::PathBuf>,
+    pub import_project_target: usize,  // index into the picker list
+    pub import_new_project_name: String,
 }
 
 impl App {
@@ -235,6 +242,9 @@ impl App {
             pdf_doi_input: String::new(),
             clipboard: arboard::Clipboard::new().ok(),
             help_scroll: 0,
+            pending_import_paths: Vec::new(),
+            import_project_target: 0,
+            import_new_project_name: String::new(),
         }
     }
 

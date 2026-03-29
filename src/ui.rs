@@ -171,6 +171,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::PdfDoi) {
         draw_pdf_doi_popup(f, app);
     }
+
+    if matches!(app.mode, Mode::ImportProject) {
+        draw_import_project_popup(f, app);
+    }
+    if matches!(app.mode, Mode::ImportNewProject) {
+        draw_input_popup(f, " New project name ", &app.import_new_project_name, Color::White);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -545,4 +552,51 @@ fn draw_pdf_doi_popup(f: &mut Frame, app: &App) {
                 .border_style(Style::default().fg(Color::Yellow)),
         );
     f.render_widget(input, area);
+}
+
+
+// ---------------------------------------------------------------------------
+// Helper: Import bib file to project
+// ---------------------------------------------------------------------------
+
+fn draw_import_project_popup(f: &mut Frame, app: &App) {
+    // Build the picker list: existing projects (minus "all") + two special entries
+    let mut options: Vec<String> = app.projects.iter()
+        .filter(|p| p.as_str() != "all")
+        .cloned()
+        .collect();
+    options.push("[ New project… ]".to_string());
+    options.push("[ No project — add to all only ]".to_string());
+
+    let items: Vec<ListItem> = options.iter().enumerate().map(|(i, p)| {
+        let style = if i == app.import_project_target {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        ListItem::new(p.as_str()).style(style)
+    }).collect();
+
+    let size = f.size();
+    let height = (options.len() as u16 + 2).min(size.height / 2);
+    let area = Rect {
+        x: size.width / 4,
+        y: size.height / 2 - height / 2,
+        width: size.width / 2,
+        height,
+    };
+
+    let n = app.pending_import_paths.len();
+    let title = format!(
+        " Import {} file{} to… (↑↓ navigate, Enter confirm, Esc cancel) ",
+        n, if n == 1 { "" } else { "s" }
+    );
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    f.render_widget(Clear, area);
+    f.render_widget(List::new(items).block(block), area);
 }

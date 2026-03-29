@@ -593,6 +593,73 @@ pub fn handle_key(
             handle_file_browser_enter(app, terminal);
         }
 
+        // ── Import project picker ─────────────────────────────────────────────
+        KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::ImportProject) => {
+            if app.import_project_target > 0 {
+                app.import_project_target -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if matches!(app.mode, Mode::ImportProject) => {
+            // options = non-all projects + 2 special entries
+            let count = app.projects.iter().filter(|p| p.as_str() != "all").count() + 2;
+            if app.import_project_target + 1 < count {
+                app.import_project_target += 1;
+            }
+        }
+        KeyCode::Esc if matches!(app.mode, Mode::ImportProject) => {
+            app.pending_import_paths.clear();
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Enter if matches!(app.mode, Mode::ImportProject) => {
+            let non_all: Vec<String> = app.projects.iter()
+                .filter(|p| p.as_str() != "all")
+                .cloned()
+                .collect();
+            let new_project_idx   = non_all.len();
+            let no_project_idx    = non_all.len() + 1;
+            let target            = app.import_project_target;
+        
+            if target == new_project_idx {
+                // Switch to new-project-name input
+                app.import_new_project_name.clear();
+                app.mode = Mode::ImportNewProject;
+            } else {
+                // Existing project or "no project"
+                let project = if target == no_project_idx {
+                    None
+                } else {
+                    non_all.get(target).cloned()
+                };
+                do_bib_import(app, project);
+            }
+        }
+        
+        // ── Import new project name input ─────────────────────────────────────
+        KeyCode::Char(c) if matches!(app.mode, Mode::ImportNewProject) => {
+            app.import_new_project_name.push(c);
+        }
+        KeyCode::Backspace if matches!(app.mode, Mode::ImportNewProject) => {
+            app.import_new_project_name.pop();
+        }
+        KeyCode::Esc if matches!(app.mode, Mode::ImportNewProject) => {
+            // Go back to project picker
+            app.mode = Mode::ImportProject;
+        }
+        KeyCode::Enter if matches!(app.mode, Mode::ImportNewProject) => {
+            let name = app.import_new_project_name.trim().to_string();
+            if name.is_empty() || name == "all" {
+                app.show_alert("Invalid project name");
+            } else if app.projects.contains(&name) {
+                app.show_alert(&format!("Project '{}' already exists", name));
+            } else {
+                let _ = app.new_project(&name);
+                app.projects.push(name.clone());
+                app.projects.sort();
+                app.selected_project = app.projects.iter().position(|p| *p == name).unwrap_or(0);
+                do_bib_import(app, Some(name));
+            }
+        }
+
         _ => {}
     }
 
@@ -662,30 +729,43 @@ fn handle_file_browser_enter(
                     app.resume_tui().ok();
                     terminal.clear().ok();
                 }
+                // NOTE: Never been tested
                 "bib" => {
-                    let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
-                    let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+                    app.pending_import_paths.push(path);
+                    // let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+                    // let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
 
-                    match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
-                        Ok(keys) if keys.is_empty() => {}
-                        Ok(keys) => {
-                            let current = app.projects[app.selected_project].clone();
-                            if current != "all" {
-                                for key in &keys {
-                                    let _ = add_to_project(&proj_map_path, &current, key);
-                                }
-                            }
-                        }
-                        Err(e) => app.show_alert(&format!("Import failed: {e}")),
-                    }
+                    // match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
+                    //     Ok(keys) if keys.is_empty() => {}
+                    //     Ok(keys) => {
+                    //         let current = app.projects[app.selected_project].clone();
+                    //         if current != "all" {
+                    //             for key in &keys {
+                    //                 let _ = add_to_project(&proj_map_path, &current, key);
+                    //             }
+                    //         }
+                    //     }
+                    //     Err(e) => app.show_alert(&format!("Import failed: {e}")),
+                    // }
                 }
                 _ => {}
             }
         }
 
-        app.load_references();
-        app.show_alert("Batch import complete");
-        app.mode = Mode::Normal;
+        //app.load_references();
+        //app.show_alert("Batch import complete");
+        //app.mode = Mode::Normal;
+
+        // If any bib files were queued, go to project picker.
+        // PDF processing already happened above (suspend/resume inline).
+        if !app.pending_import_paths.is_empty() {
+            app.import_project_target = 0;
+            app.mode = Mode::ImportProject;
+        } else {
+            app.load_references();
+            app.show_alert("Batch import complete");
+            app.mode = Mode::Normal;
+        }
         return;
     }
 
@@ -705,25 +785,30 @@ fn handle_file_browser_enter(
         match ext {
             "bib" => {
                 app.file_browser = None;
-                app.mode = Mode::Normal;
 
-                let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
-                let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+                app.pending_import_paths = vec![path];
+                app.import_project_target = 0;
+                app.mode = Mode::ImportProject;
 
-                match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
-                    Ok(keys) if keys.is_empty() => app.show_alert("No new entries found"),
-                    Ok(keys) => {
-                        let current = app.projects[app.selected_project].clone();
-                        if current != "all" {
-                            for key in &keys {
-                                let _ = add_to_project(&proj_map_path, &current, key);
-                            }
-                        }
-                        app.load_references();
-                        app.show_alert(&format!("Imported {} entries", keys.len()));
-                    }
-                    Err(e) => app.show_alert(&format!("Import failed: {e}")),
-                }
+                // app.mode = Mode::Normal;
+
+                // let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+                // let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+
+                // match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
+                //     Ok(keys) if keys.is_empty() => app.show_alert("No new entries found"),
+                //     Ok(keys) => {
+                //         let current = app.projects[app.selected_project].clone();
+                //         if current != "all" {
+                //             for key in &keys {
+                //                 let _ = add_to_project(&proj_map_path, &current, key);
+                //             }
+                //         }
+                //         app.load_references();
+                //         app.show_alert(&format!("Imported {} entries", keys.len()));
+                //     }
+                //     Err(e) => app.show_alert(&format!("Import failed: {e}")),
+                // }
             }
             "pdf" => {
                 app.file_browser = None;
@@ -787,4 +872,31 @@ fn handle_file_browser_enter(
         }
     }
 }
+
+fn do_bib_import(app: &mut App, project: Option<String>) {
+    let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+    let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+    let paths = std::mem::take(&mut app.pending_import_paths);
+    let mut total = 0usize;
+
+    for path in &paths {
+        match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
+            Ok(keys) => {
+                total += keys.len();
+                if let Some(ref proj) = project {
+                    for key in &keys {
+                        let _ = add_to_project(&proj_map_path, proj, key);
+                    }
+                }
+            }
+            Err(e) => app.show_alert(&format!("Import failed: {e}")),
+        }
+    }
+
+    app.load_references();
+    let dest = project.as_deref().unwrap_or("all");
+    app.show_alert(&format!("Imported {} entries into '{}'", total, dest));
+    app.mode = Mode::Normal;
+}
+
 
