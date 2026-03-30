@@ -3,7 +3,7 @@
 
 # bshelf
 
-Let reorganize your bookshelf!
+Let's reorganize your bookshelf!
 
 A terminal-based reference manager built with 
 [Ratatui](https://github.com/ratatui-org/ratatui). 
