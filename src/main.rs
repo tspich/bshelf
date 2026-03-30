@@ -21,8 +21,6 @@ use app::App;
 // TODO: 
 //  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
 //  - make search show results on the fly
-//  - When importing from bib file, should ask, if one want to create a new 
-//    project out of it. 
 //  - import bib multiple and single need testing.
 //
 

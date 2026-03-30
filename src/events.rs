@@ -38,9 +38,11 @@ pub fn handle_key(
         }
         KeyCode::Char(c) if matches!(app.mode, Mode::Search) => {
             app.search_query.push(c);
+            app.apply_search_live();
         }
         KeyCode::Backspace if matches!(app.mode, Mode::Search) => {
             app.search_query.pop();
+            app.apply_search_live();
         }
         KeyCode::Esc if matches!(app.mode, Mode::Search) => {
             app.search_query.clear();
@@ -48,7 +50,8 @@ pub fn handle_key(
             app.mode = Mode::Normal;
         }
         KeyCode::Enter if matches!(app.mode, Mode::Search) => {
-            app.apply_search();
+            // app.apply_search();
+            app.mode = Mode::Normal;
         }
         KeyCode::Esc if matches!(app.mode, Mode::Normal) => {
             app.search_query.clear();

@@ -289,24 +289,39 @@ impl App {
         self.search_query.clear();
     }
 
-    pub fn apply_search(&mut self) {
+    // pub fn apply_search(&mut self) {
+    //     if self.search_query.is_empty() {
+    //         self.clear_filtered_refs();
+    //         self.mode = Mode::Normal;
+    //         return;
+    //     }
+
+    //     let query = self.search_query.clone();
+
+    //     self.filtered_refs = self
+    //         .references
+    //         .iter()
+    //         .filter(|entry| entry_matches(entry, &query))
+    //         .cloned()
+    //         .collect();
+
+    //     self.selected_reference = 0;
+    //     self.mode = Mode::Normal;
+    // }
+
+    /// Updates filtered_refs on every keystroke without leaving search mode.
+    pub fn apply_search_live(&mut self) {
         if self.search_query.is_empty() {
-            self.clear_filtered_refs();
-            self.mode = Mode::Normal;
-            return;
+            self.filtered_refs.clear();
+        } else {
+            let query = self.search_query.clone();
+            self.filtered_refs = self.references
+                .iter()
+                .filter(|entry| entry_matches(entry, &query))
+                .cloned()
+                .collect();
         }
-
-        let query = self.search_query.clone();
-
-        self.filtered_refs = self
-            .references
-            .iter()
-            .filter(|entry| entry_matches(entry, &query))
-            .cloned()
-            .collect();
-
         self.selected_reference = 0;
-        self.mode = Mode::Normal;
     }
 
     pub fn show_alert(&mut self, msg: &str) {
