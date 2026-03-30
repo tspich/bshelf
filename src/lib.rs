@@ -733,7 +733,7 @@ pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
                     .strip_prefix("https://doi.org/")
                     .or_else(|| stored.strip_prefix("http://doi.org/"))
                     .unwrap_or(&stored);
-                stored_bare == doi
+                stored_bare == doi.to_lowercase()
             })
             .unwrap_or(false)
     })
