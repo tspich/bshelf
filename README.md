@@ -46,8 +46,6 @@ search
 
 ## Installation
 
-Not deployed so far
-
 ```bash
 git clone https://github.com/tspich/bshelf
 cd bshelf
@@ -110,12 +108,12 @@ projects_file = "~/.local/share/bshelf/projects.json"
 | `E` | Export current project to `{project}.bib` |
 | `F` | Re-fetch missing metadata from Crossref |
 | `I` | Import a `.bib` file via file browser |
+| `L` | Show logs |
 | `M` | Copy reference to another project |
 | `N` | Create new project |
 | `P` | Import a PDF and link to reference |
 | `R` | Rename current project |
 | `X` | Delete current project (asks confirmation) |
-| `L` | Show logs |
 | `Enter` | Open PDF for selected reference |
 
 ### Search
@@ -141,16 +139,4 @@ projects_file = "~/.local/share/bshelf/projects.json"
 - **`projects.json`** — a JSON map of project names to lists of citation keys:
 - **`bshelf.log`** — log file for some actions:
 
-```json
-{
-  "physics": ["smith_2023", "jones_2024"],
-  "biology": ["darwin_1859"]
-}
-```
-
 References are never duplicated in `all.bib` — projects only store keys.
-
-# Limitations and TODOs
-
-- Keybindings are hard coded, should be configurable through the config file.
-- While importing from `.bib` file, keys are taken over. Can be problematic to reuse those in LaTex.
