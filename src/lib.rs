@@ -117,6 +117,9 @@ pub fn load_projects_map(path: &str) -> Result<ProjectsMap> {
         return Ok(HashMap::new());
     }
     let content = fs::read_to_string(path)?;
+    if content.trim().is_empty(){
+        return Ok(HashMap::new());
+    }
     Ok(serde_json::from_str(&content)?)
 }
 
@@ -158,16 +161,16 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     let content = fs::read_to_string(&all_bib)?;
     let mut bib = Bibliography::parse(&content)?;
 
-    let doi_url = format!("https://doi.org/{doi}");
+    // let doi_url = format!("https://doi.org/{doi}");
 
-    // 2. Duplicate check
-    if let Some(existing) = bib.iter().find(|e| {
-        e.get("doi")
-            .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url)) 
-            .unwrap_or(false)
-    }){
-        return Ok(existing.key.clone());
-    }
+    // // 2. Duplicate check
+    // if let Some(existing) = bib.iter().find(|e| {
+    //     e.get("doi")
+    //         .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url)) 
+    //         .unwrap_or(false)
+    // }){
+    //     return Ok(existing.key.clone());
+    // }
 
     // 3. Fetch Crossref
     let client = Crossref::builder()
@@ -400,29 +403,41 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
         Bibliography::parse(&all_content)?
     };
 
-    let mut imported_keys = Vec::new();
+    let mut keys = Vec::new();
 
     for entry in import_bib.iter() {
-        // Deduplicate by DOI if present, otherwise by key
-        let already_exists = if let Some(doi_chunks) = entry.get("doi") {
-            let doi = chunks_to_string(doi_chunks);
-            all_bib.iter().any(|e| {
+        // Try to find an existing entry in all.bib:
+        // 1. Match by DOI (normalised) if present
+        // 2. Fall back to matching by key
+        let existing_key = if let Some(doi_chunks) = entry.get("doi") {
+            let doi = chunks_to_string(doi_chunks).to_lowercase();
+            all_bib.iter().find(|e| {
                 e.get("doi")
-                    .map(|c| chunks_to_string(c) == doi)
+                    .map(|c| {
+                        let stored = chunks_to_string(c).to_lowercase();
+                        stored == doi
+                    })
                     .unwrap_or(false)
             })
+            .map(|e| e.key.clone())
         } else {
-            all_bib.get(&entry.key).is_some()
+            all_bib.get(&entry.key).map(|e| e.key.clone())
         };
 
-        if !already_exists {
+        let key = if let Some(k) = existing_key {
+            // Already in all.bib — use the canonical key from all.bib
+            k
+        } else {
+            // Not in all.bib — add it
             all_bib.insert(entry.clone());
-            imported_keys.push(entry.key.clone());
-        }
+            entry.key.clone()
+        };
+
+        keys.push(key);
     }
 
     fs::write(all_bib_path, all_bib.to_biblatex_string())?;
-    Ok(imported_keys)
+    Ok(keys)
 }
 
 pub fn rename_project(proj_map_path: &str, old_name: &str, new_name: &str) -> Result<()> {
@@ -696,4 +711,31 @@ fn expand_tilde(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
+    let content = std::fs::read_to_string(all_bib_path).ok()?;
+    let bib = biblatex::Bibliography::parse(&content).ok()?;
+
+    // Normalise to bare DOI for comparison
+    // let bare = doi
+    //     .strip_prefix("https://doi.org/")
+    //     .or_else(|| doi.strip_prefix("http://doi.org/"))
+    //     .unwrap_or(doi)
+    //     .to_lowercase();
+
+    bib.iter().find(|e| {
+        e.get("doi")
+            .map(|chunks| {
+                let stored = chunks_to_string(chunks).to_lowercase();
+                // Match whether stored as bare DOI or full URL
+                let stored_bare = stored
+                    .strip_prefix("https://doi.org/")
+                    .or_else(|| stored.strip_prefix("http://doi.org/"))
+                    .unwrap_or(&stored);
+                stored_bare == doi
+            })
+            .unwrap_or(false)
+    })
+    .map(|e| e.key.clone())
 }
