@@ -1,7 +1,9 @@
 [package]
 name = "bshelf"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/tspich/bshelf"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
