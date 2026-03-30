@@ -20,7 +20,6 @@ use app::App;
 //
 // TODO: 
 //  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
-//  - make search show results on the fly
 //  - import bib multiple and single need testing.
 //
 

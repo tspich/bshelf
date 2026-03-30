@@ -64,7 +64,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(project_list, panels[0]);
 
     // ── Middle panel: references ───────────────────────────────────────────────
-    let refs_to_show = if !app.filtered_refs.is_empty() {
+    let refs_to_show = if !app.search_query.is_empty() {
         app.filtered_refs.clone()
     } else {
         app.references.clone()
@@ -118,7 +118,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // ── Bottom: search box ──────────────────────────────────────────────────
     let search_text = if matches!(app.mode, Mode::Search) {
         format!("/{}", app.search_query)
-    } else if !app.filtered_refs.is_empty() {
+    } else if !app.search_query.is_empty() {
         format!("Filter: {}", app.search_query)
     } else {
         String::from("Press / to search")

@@ -169,26 +169,30 @@ pub fn handle_key(
             }
         }
         KeyCode::Down | KeyCode::Char('j') if matches!(app.mode, Mode::Normal) => {
-            let len = if !app.filtered_refs.is_empty() { app.filtered_refs.len() } else { app.references.len() };
+            let len = if !app.search_query.is_empty() { app.filtered_refs.len() } else { app.references.len() };
             if app.selected_reference + 1 < len {
                 app.selected_reference += 1;
                 app.detail_scroll = 0;
             }
         }
-        KeyCode::Left | KeyCode::Char('h') if matches!(app.mode, Mode::Normal) => {
+        KeyCode::Left | KeyCode::Char('h') if matches!(app.mode, Mode::Normal | Mode::Search) => {
             if app.selected_project > 0 {
                 app.selected_project -= 1;
                 app.project_scroll = 0;
                 app.load_references();
-                app.clear_filtered_refs();
+                if !app.search_all_refs.is_empty() {
+                    app.update_filtered_for_project();
+                }
             }
         }
-        KeyCode::Right | KeyCode::Char('l') if matches!(app.mode, Mode::Normal) => {
+        KeyCode::Right | KeyCode::Char('l') if matches!(app.mode, Mode::Normal | Mode::Search) => {
             if app.selected_project + 1 < app.projects.len() {
                 app.selected_project += 1;
                 app.project_scroll = 0;
                 app.load_references();
-                app.clear_filtered_refs();
+                if !app.search_all_refs.is_empty() {
+                    app.update_filtered_for_project();
+                }
             }
         }
         KeyCode::Down | KeyCode::Char('g') if matches!(app.mode, Mode::Normal) => {
@@ -196,7 +200,7 @@ pub fn handle_key(
             app.detail_scroll = 0;
         }
         KeyCode::Down | KeyCode::Char('G') if matches!(app.mode, Mode::Normal) => {
-            let len = if !app.filtered_refs.is_empty() { app.filtered_refs.len() } else { app.references.len() };
+            let len = if !app.search_query.is_empty() { app.filtered_refs.len() } else { app.references.len() };
             app.selected_reference = len-1;
             app.detail_scroll = 0;
         }
@@ -226,7 +230,7 @@ pub fn handle_key(
                 .cloned()
                 .collect();
             if let Some(target_project) = targets.get(app.moving_target) {
-                let active_refs = if !app.filtered_refs.is_empty() {
+                let active_refs = if !app.search_query.is_empty() {
                     &app.filtered_refs
                 } else {
                     &app.references
@@ -251,7 +255,7 @@ pub fn handle_key(
 
         // ── Open PDF / Enter ──────────────────────────────────────────────────
         KeyCode::Enter if matches!(app.mode, Mode::Normal) => {
-            let active_refs = if !app.filtered_refs.is_empty() {
+            let active_refs = if !app.search_query.is_empty() {
                 app.filtered_refs.clone()
             } else {
                 app.references.clone()
@@ -306,7 +310,7 @@ pub fn handle_key(
 
         // ── Re-fetch metadata ────────────────────────────────────────────────
         KeyCode::Char('F') if matches!(app.mode, Mode::Normal) => {
-            let active_refs = if !app.filtered_refs.is_empty() {
+            let active_refs = if !app.search_query.is_empty() {
                 app.filtered_refs.clone()
             } else {
                 app.references.clone()
@@ -359,7 +363,7 @@ pub fn handle_key(
         }
         KeyCode::Char('y') | KeyCode::Char('Y') if matches!(app.mode, Mode::ConfirmRemoveRef) => {
             let current = app.projects[app.selected_project].clone();
-            let active_refs = if !app.filtered_refs.is_empty() {
+            let active_refs = if !app.search_query.is_empty() {
                 app.filtered_refs.clone()
             } else {
                 app.references.clone()
@@ -474,7 +478,7 @@ pub fn handle_key(
 
         // ── Copy key to clipboard ─────────────────────────────────────────────
         KeyCode::Char('c') if matches!(app.mode, Mode::Normal) => {
-            let active_refs = if !app.filtered_refs.is_empty() {
+            let active_refs = if !app.search_query.is_empty() {
                 &app.filtered_refs
             } else {
                 &app.references

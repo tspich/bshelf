@@ -206,6 +206,7 @@ pub struct App {
     pub pending_import_paths: Vec<std::path::PathBuf>,
     pub import_project_target: usize,  // index into the picker list
     pub import_new_project_name: String,
+    pub search_all_refs: Vec<Entry>,
 }
 
 impl App {
@@ -245,6 +246,7 @@ impl App {
             pending_import_paths: Vec::new(),
             import_project_target: 0,
             import_new_project_name: String::new(),
+            search_all_refs: Vec::new(),
         }
     }
 
@@ -282,6 +284,7 @@ impl App {
 
     pub fn clear_filtered_refs(&mut self) {
         self.filtered_refs.clear();
+        self.search_all_refs.clear();
     }
 
     pub fn enter_search_mode(&mut self) {
@@ -312,14 +315,24 @@ impl App {
     /// Updates filtered_refs on every keystroke without leaving search mode.
     pub fn apply_search_live(&mut self) {
         if self.search_query.is_empty() {
+            self.search_all_refs.clear();
             self.filtered_refs.clear();
         } else {
+            // Search across the entire library
+            let all_bib_path = self.config.all_bib.to_string_lossy().to_string();
+            let all_entries: Vec<Entry> = fs::read_to_string(&all_bib_path)
+                .ok()
+                .and_then(|content| Bibliography::parse(&content).ok())
+                .map(|bib| bib.iter().cloned().collect())
+                .unwrap_or_default();
+
             let query = self.search_query.clone();
-            self.filtered_refs = self.references
-                .iter()
+            self.search_all_refs = all_entries
+                .into_iter()
                 .filter(|entry| entry_matches(entry, &query))
-                .cloned()
                 .collect();
+
+            self.update_filtered_for_project();
         }
         self.selected_reference = 0;
     }
@@ -381,5 +394,32 @@ impl App {
         } else if self.selected_project >= self.project_scroll + visible {
             self.project_scroll = self.selected_project - visible + 1;
         }
+    }
+
+    pub fn update_filtered_for_project(&mut self) {
+        if self.search_all_refs.is_empty() {
+            self.filtered_refs.clear();
+            return;
+        }
+    
+        let current = self.projects.get(self.selected_project).map(|s| s.as_str());
+        self.filtered_refs = match current {
+            Some("all") => self.search_all_refs.clone(),
+            Some(project) => {
+                let proj_map_path = self.config.projects_file.to_string_lossy().to_string();
+                let map: ProjectsMap = fs::read_to_string(&proj_map_path)
+                    .ok()
+                    .and_then(|data| serde_json::from_str(&data).ok())
+                    .unwrap_or_default();
+                let keys = map.get(project).cloned().unwrap_or_default();
+                self.search_all_refs
+                    .iter()
+                    .filter(|e| keys.contains(&e.key))
+                    .cloned()
+                    .collect()
+            }
+            None => vec![],
+        };
+        self.selected_reference = 0;
     }
 }
