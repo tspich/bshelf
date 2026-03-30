@@ -115,6 +115,7 @@ projects_file = "~/.local/share/bshelf/projects.json"
 | `P` | Import a PDF and link to reference |
 | `R` | Rename current project |
 | `X` | Delete current project (asks confirmation) |
+| `L` | Show logs |
 | `Enter` | Open PDF for selected reference |
 
 ### Search
@@ -138,6 +139,7 @@ projects_file = "~/.local/share/bshelf/projects.json"
 
 - **`all.bib`** — a standard BibLaTeX file containing all references across all projects
 - **`projects.json`** — a JSON map of project names to lists of citation keys:
+- **`bshelf.log`** — log file for some actions:
 
 ```json
 {
@@ -150,6 +152,5 @@ References are never duplicated in `all.bib` — projects only store keys.
 
 # Limitations and TODOs
 
-- For now only `nvim` as editor.
 - Keybindings are hard coded, should be configurable through the config file.
 - While importing from `.bib` file, keys are taken over. Can be problematic to reuse those in LaTex.

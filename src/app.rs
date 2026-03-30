@@ -207,6 +207,7 @@ pub struct App {
     pub import_project_target: usize,  // index into the picker list
     pub import_new_project_name: String,
     pub search_all_refs: Vec<Entry>,
+    pub log_path: std::path::PathBuf,
 }
 
 impl App {
@@ -218,6 +219,11 @@ impl App {
 
         projects.sort();
         projects.insert(0, "all".to_string());
+
+        let log_path = config.all_bib
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("bshelf.log");
 
         App {
             config,
@@ -247,6 +253,7 @@ impl App {
             import_project_target: 0,
             import_new_project_name: String::new(),
             search_all_refs: Vec::new(),
+            log_path,
         }
     }
 
@@ -291,26 +298,6 @@ impl App {
         self.mode = Mode::Search;
         self.search_query.clear();
     }
-
-    // pub fn apply_search(&mut self) {
-    //     if self.search_query.is_empty() {
-    //         self.clear_filtered_refs();
-    //         self.mode = Mode::Normal;
-    //         return;
-    //     }
-
-    //     let query = self.search_query.clone();
-
-    //     self.filtered_refs = self
-    //         .references
-    //         .iter()
-    //         .filter(|entry| entry_matches(entry, &query))
-    //         .cloned()
-    //         .collect();
-
-    //     self.selected_reference = 0;
-    //     self.mode = Mode::Normal;
-    // }
 
     /// Updates filtered_refs on every keystroke without leaving search mode.
     pub fn apply_search_live(&mut self) {
@@ -421,5 +408,25 @@ impl App {
             None => vec![],
         };
         self.selected_reference = 0;
+    }
+
+    pub fn log(&self, msg: &str) {
+        use std::io::Write;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| {
+                let secs = d.as_secs();
+                let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
+                format!("{:02}:{:02}:{:02}", h, m, s)
+            })
+            .unwrap_or_else(|_| "??:??:??".to_string());
+    
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)
+        {
+            let _ = writeln!(f, "[{}] {}", timestamp, msg);
+        }
     }
 }

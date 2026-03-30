@@ -667,6 +667,19 @@ pub fn handle_key(
             }
         }
 
+        // ── Show logs ─────────────────────────────────────
+        KeyCode::Char('L') if matches!(app.mode, Mode::Normal) => {
+            let log_path = app.log_path.to_string_lossy().to_string();
+            app.suspend_tui().ok();
+            let _ = std::process::Command::new("less")
+                .arg(&log_path)
+                .status();
+
+            app.resume_tui().ok();
+            terminal.clear().ok();
+
+        }
+
         _ => {}
     }
 
@@ -702,10 +715,12 @@ fn handle_file_browser_enter(
 
                     app.suspend_tui().ok();
                     println!("Processing: {}", path.display());
+                    app.log(&format!("Processing PDF: {}", path.display()));
                     let doi = extract_doi_from_pdf(&pdf_str);
 
                     match doi {
                         Some(doi) => {
+                            app.log(&format!("  DOI found: {}", doi));
 
                             let existing_key = find_existing_by_doi(&all_bib_path, &doi);
 
@@ -726,12 +741,19 @@ fn handle_file_browser_enter(
                                     }
                                     let _ = link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str);
                                     println!("  ✓ Added as '{key}'");
+                                    app.log(&format!("  Added as '{}'", key));
                                 }
-                                Err(e) => println!("  ✗ Failed: {e}"),
+                                Err(e) => {
+                                    app.log(&format!("  Failed to fetch metadata '{}'", e));
+                                    println!("  ✗ Failed: {e}");
+                                }
                             }
 
                         }
-                        None => println!("  ✗ No DOI found in: {}", path.display()),
+                        None => {
+                            app.log(&format!("  No DOI found in: {}", path.display()));
+                            println!("  ✗ No DOI found in: {}", path.display());
+                        }
                     }
                     app.resume_tui().ok();
                     terminal.clear().ok();
@@ -739,29 +761,10 @@ fn handle_file_browser_enter(
                 // NOTE: Never been tested
                 "bib" => {
                     app.pending_import_paths.push(path);
-                    // let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
-                    // let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
-
-                    // match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
-                    //     Ok(keys) if keys.is_empty() => {}
-                    //     Ok(keys) => {
-                    //         let current = app.projects[app.selected_project].clone();
-                    //         if current != "all" {
-                    //             for key in &keys {
-                    //                 let _ = add_to_project(&proj_map_path, &current, key);
-                    //             }
-                    //         }
-                    //     }
-                    //     Err(e) => app.show_alert(&format!("Import failed: {e}")),
-                    // }
                 }
                 _ => {}
             }
         }
-
-        //app.load_references();
-        //app.show_alert("Batch import complete");
-        //app.mode = Mode::Normal;
 
         // If any bib files were queued, go to project picker.
         // PDF processing already happened above (suspend/resume inline).
@@ -796,26 +799,6 @@ fn handle_file_browser_enter(
                 app.pending_import_paths = vec![path];
                 app.import_project_target = 0;
                 app.mode = Mode::ImportProject;
-
-                // app.mode = Mode::Normal;
-
-                // let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
-                // let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
-
-                // match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
-                //     Ok(keys) if keys.is_empty() => app.show_alert("No new entries found"),
-                //     Ok(keys) => {
-                //         let current = app.projects[app.selected_project].clone();
-                //         if current != "all" {
-                //             for key in &keys {
-                //                 let _ = add_to_project(&proj_map_path, &current, key);
-                //             }
-                //         }
-                //         app.load_references();
-                //         app.show_alert(&format!("Imported {} entries", keys.len()));
-                //     }
-                //     Err(e) => app.show_alert(&format!("Import failed: {e}")),
-                // }
             }
             "pdf" => {
                 app.file_browser = None;
@@ -824,6 +807,8 @@ fn handle_file_browser_enter(
                 let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
                 let pdfs_dir      = app.config.pdfs_dir.to_string_lossy().to_string();
 
+                app.log(&format!("Processing PDF: {}", path.display()));
+
                 app.suspend_tui().ok();
                 let doi = extract_doi_from_pdf(&pdf_str);
                 app.resume_tui().ok();
@@ -831,6 +816,7 @@ fn handle_file_browser_enter(
 
                 match doi {
                     Some(doi) => {
+                        app.log(&format!("  DOI found: {}", doi));
                         app.suspend_tui().ok();
 
                         let existing_key = find_existing_by_doi(&all_bib_path, &doi);
@@ -854,20 +840,30 @@ fn handle_file_browser_enter(
                                     let _ = add_to_project(&proj_map_path, &current, &key);
                                 }
                                 match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str) {
-                                    Ok(_)  => app.show_alert(&format!("Linked PDF to '{}'", key)),
-                                    Err(e) => app.show_alert(&format!("PDF copy failed: {e}")),
+                                    Ok(_)  => {
+                                        app.show_alert(&format!("Linked PDF to '{}'", key));
+                                        app.log(&format!("  Added as '{}', linked PDF", key));
+                                    }
+                                    Err(e) => {
+                                        app.log(&format!("  PDF copy failed: '{}'", e));
+                                        app.show_alert(&format!("PDF copy failed: {e}"));
+                                    }
                                 }
                                 app.load_references();
                                 if let Some(idx) = app.references.iter().position(|e| e.key == key) {
                                     app.selected_reference = idx;
                                 }
                             }
-                            Err(e) => app.show_alert(&format!("Failed to add reference: {e}")),
+                            Err(e) => {
+                                app.log(&format!("  Failed to add reference: '{}'", e));
+                                app.show_alert(&format!("Failed to add reference: {e}"));
+                            }
                         }
 
                         app.mode = Mode::Normal;
                     }
                     None => {
+                        app.log(&format!("  No DOI found in: {}", path.display()));
                         // Prompt user for DOI manually
                         app.pending_pdf_path = Some(path);
                         app.pdf_doi_input.clear();
@@ -887,21 +883,30 @@ fn do_bib_import(app: &mut App, project: Option<String>) {
     let mut total = 0usize;
 
     for path in &paths {
+        app.log(&format!("Importing bib: {}", path.display()));
         match import_bib_file(&all_bib_path, path.to_str().unwrap_or("")) {
             Ok(keys) => {
+                app.log(&format!("  {} entries found: {}", keys.len(), keys.join(", ")));
                 total += keys.len();
                 if let Some(ref proj) = project {
                     for key in &keys {
-                        let _ = add_to_project(&proj_map_path, proj, key);
+                        match add_to_project(&proj_map_path, proj, key) {
+                            Ok(_)  => app.log(&format!("  Added '{}' to project '{}'", key, proj)),
+                            Err(e) => app.log(&format!("  Failed to add '{}' to project '{}': {}", key, proj, e)),
+                        }
                     }
                 }
             }
-            Err(e) => app.show_alert(&format!("Import failed: {e}")),
+            Err(e) => {
+                app.log(&format!("  Import failed: {}", e));
+                app.show_alert(&format!("Import failed: {e}"));
+            }
         }
     }
 
     app.load_references();
     let dest = project.as_deref().unwrap_or("all");
+    app.log(&format!("Import complete: {} entries into '{}'", total, dest));
     app.show_alert(&format!("Imported {} entries into '{}'", total, dest));
     app.mode = Mode::Normal;
 }

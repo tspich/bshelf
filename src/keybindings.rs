@@ -54,6 +54,7 @@ pub fn help_lines() -> &'static [&'static str] {
         "  P             Import PDF and link to reference",
         "  c             Copy the current key to the clipboard",
         "  X             Delete current project",
+        "  L             Show logs",
         "  Enter         Open PDF (if available)",
         "",
         "  SEARCH",
