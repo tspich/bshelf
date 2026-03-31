@@ -428,9 +428,44 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
             // Already in all.bib — use the canonical key from all.bib
             k
         } else {
-            // Not in all.bib — add it
-            all_bib.insert(entry.clone());
-            entry.key.clone()
+            let has_doi = entry.get("doi")
+                .map(|c| !chunks_to_string(c).trim().is_empty())
+                .unwrap_or(false);
+
+            if !has_doi {
+                let title = entry.get("title")
+                    .map(|c| chunks_to_string(c))
+                    .unwrap_or_default();
+                let author = entry.author().ok()
+                    .and_then(|a| a.into_iter().next())
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+
+                if !title.is_empty() {
+                    // Try fetching full metadata; fall back to inserting as-is
+                    match add_reference_by_metadata(all_bib, &title, &author) {
+                        Ok(fetched_key) => {
+                            // add_reference already wrote to disk, re-parse
+                            // so subsequent iterations see the updated bib
+                            let refreshed = fs::read_to_string(all_bib)?;
+                            all_bib = Bibliography::parse(&refreshed)?;
+                            fetched_key
+                        }
+                        Err(e) => {
+                            // Crossref lookup failed — insert the entry as-is
+                            all_bib.insert(entry.clone());
+                            entry.key.clone()
+                        }
+                    }
+                } else {
+                    all_bib.insert(entry.clone());
+                    entry.key.clone()
+                }
+            } else {
+                // Not in all.bib — add it
+                all_bib.insert(entry.clone());
+                entry.key.clone()
+        }
         };
 
         keys.push(key);
@@ -738,4 +773,44 @@ pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
             .unwrap_or(false)
     })
     .map(|e| e.key.clone())
+}
+
+pub fn add_reference_by_metadata(all_bib: &str, title: &str, author: &str) -> Result<String> {
+    let content = fs::read_to_string(all_bib)?;
+    let mut bib = Bibliography::parse(&content)?;
+
+    // Duplicate check by title (rough but avoids re-adding the same thing)
+    let title_lower = title.to_lowercase();
+    if let Some(existing) = bib.iter().find(|e| {
+        e.get("title")
+            .map(|c| chunks_to_string(c).to_lowercase())
+            .map(|t| t == title_lower)
+            .unwrap_or(false)
+    }) {
+        return Ok(existing.key.clone());
+    }
+
+    // Query Crossref by title + author
+    let query = if author.is_empty() {
+        title.to_string()
+    } else {
+        format!("{} {}", title, author)
+    };
+
+    let url = format!(
+        "https://api.crossref.org/works?query={}&rows=1&select=DOI",
+        urlencoding::encode(&query)
+    );
+
+    let resp: serde_json::Value = blocking::get(&url)?.json()?;
+
+    let doi = resp["message"]["items"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["DOI"].as_str())
+        .ok_or_else(|| anyhow::anyhow!("No Crossref result for: {}", title))?
+        .to_string();
+
+    // Now fetch full metadata via the found DOI
+    add_reference(all_bib, &doi)
 }
