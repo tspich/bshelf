@@ -564,13 +564,21 @@ pub fn handle_key(
         }
         KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::FileBrowser) => {
             if let Some(fb) = &mut app.file_browser {
-                if fb.selected > 0 { fb.selected -= 1; }
+                if fb.filtering{
+                    fb.filter.push('k');
+                } else if fb.selected > 0 { 
+                    fb.selected -= 1; 
+                }
             }
         }
         KeyCode::Down | KeyCode::Char('j') if matches!(app.mode, Mode::FileBrowser) => {
             if let Some(fb) = &mut app.file_browser {
-                let count = fb.visible_entries().len();
-                if fb.selected + 1 < count { fb.selected += 1; }
+                if fb.filtering {
+                    fb.filter.push('j');
+                } else {
+                    let count = fb.visible_entries().len();
+                    if fb.selected + 1 < count { fb.selected += 1; }
+                }
             }
         }
         KeyCode::Char(' ') if matches!(app.mode, Mode::FileBrowser) => {
@@ -784,8 +792,8 @@ fn handle_file_browser_enter(
         let fb = app.file_browser.as_mut().unwrap();
         if fb.filtering {
             fb.filtering = false;
-            fb.filter.clear();
-            return;
+            // fb.filter.clear();
+            // return;
         }
         fb.enter()
     };

@@ -443,11 +443,11 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
 
                 if !title.is_empty() {
                     // Try fetching full metadata; fall back to inserting as-is
-                    match add_reference_by_metadata(all_bib, &title, &author) {
+                    match add_reference_by_metadata(all_bib_path, &title, &author) {
                         Ok(fetched_key) => {
                             // add_reference already wrote to disk, re-parse
                             // so subsequent iterations see the updated bib
-                            let refreshed = fs::read_to_string(all_bib)?;
+                            let refreshed = fs::read_to_string(all_bib_path)?;
                             all_bib = Bibliography::parse(&refreshed)?;
                             fetched_key
                         }
