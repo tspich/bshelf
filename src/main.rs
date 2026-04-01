@@ -23,6 +23,8 @@ use app::App;
 //  - Ordering seperate between upper and lower case. Should not be the case.
 //  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
 //  - import bib multiple need testing.
+//  - While refetching data, should also check if the reference is not already
+//    in the bookshelf, if yes keep only one.
 //
 
 fn main() -> Result<()> {

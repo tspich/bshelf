@@ -334,6 +334,9 @@ pub fn handle_key(
                     Err(e) => app.show_alert(&format!("Fetch failed: {e}")),
                 }
             }
+            app.search_query.clear();
+            app.clear_filtered_refs();
+            app.mode = Mode::Normal;
         }
 
         // ── Import .bib file ──────────────────────────────────────────────────
