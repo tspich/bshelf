@@ -111,7 +111,11 @@ impl FileBrowser {
                 v.sort_by(|a, b| {
                     let da = a.is_dir();
                     let db = b.is_dir();
-                    db.cmp(&da).then(a.file_name().cmp(&b.file_name()))
+                    db.cmp(&da).then_with(|| {
+                        let a_name = a.file_name().map(|n| n.to_string_lossy().to_lowercase());
+                        let b_name = b.file_name().map(|n| n.to_string_lossy().to_lowercase());
+                        a_name.cmp(&b_name)
+                    })
                 });
                 v
             })
@@ -282,7 +286,7 @@ impl App {
             None => vec![],
         };
 
-        refs.sort_by(|a, b| a.key.cmp(&b.key));
+        refs.sort_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
         self.references = refs;
         self.selected_reference = 0;
         self.ref_scroll = 0;
