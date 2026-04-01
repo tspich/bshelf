@@ -451,7 +451,7 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
                             all_bib = Bibliography::parse(&refreshed)?;
                             fetched_key
                         }
-                        Err(e) => {
+                        Err(_e) => {
                             // Crossref lookup failed — insert the entry as-is
                             all_bib.insert(entry.clone());
                             entry.key.clone()
@@ -512,17 +512,45 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
         .clone();
 
     // Get DOI from entry — bail early if none
-    let doi = entry.get("doi")
-        .map(|c| chunks_to_string(c))
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("No DOI found for '{}'", key))?;
+    let doi = {
+        let stored = entry.get("doi")
+            .map(|c| chunks_to_string(c))
+            .filter(|s| !s.is_empty());
+        if let Some(doi) = stored {
+            doi.strip_prefix("https://doi.org/")
+                .or_else(|| doi.strip_prefix("http://doi.org/"))
+                .unwrap_or(&doi)
+                .to_string()
+        } else {
+                // No DOI — look up via title + author
+                let title = entry.get("title")
+                    .map(|c| chunks_to_string(c))
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("No DOI or title found for '{}'", key))?;
+
+                let author = entry.author().ok()
+                    .and_then(|a| a.into_iter().next())
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+
+                let query = format!("{} {}", title, author);
+                let url = format!(
+                    "https://api.crossref.org/works?query={}&rows=1&select=DOI",
+                    urlencoding::encode(&query)
+                );
+
+                let resp: serde_json::Value = blocking::get(&url)?.json()?;
+
+                resp["message"]["items"]
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .and_then(|item| item["DOI"].as_str())
+                    .ok_or_else(|| anyhow::anyhow!("No Crossref result found for '{}'", key))?
+                    .to_string()
+        }
+    };
 
     // Strip https://doi.org/ prefix if present
-    let doi = doi
-        .strip_prefix("https://doi.org/")
-        .or_else(|| doi.strip_prefix("http://doi.org/"))
-        .unwrap_or(&doi)
-        .to_string();
 
     let client = Crossref::builder()
         .build()
@@ -777,7 +805,7 @@ pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
 
 pub fn add_reference_by_metadata(all_bib: &str, title: &str, author: &str) -> Result<String> {
     let content = fs::read_to_string(all_bib)?;
-    let mut bib = Bibliography::parse(&content)?;
+    let bib = Bibliography::parse(&content)?;
 
     // Duplicate check by title (rough but avoids re-adding the same thing)
     let title_lower = title.to_lowercase();

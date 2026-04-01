@@ -19,14 +19,10 @@ use app::App;
 //  - Get DOI from PDF can be very tedious, need to be careful
 //
 // TODO: 
-//  - Issue in FileBrowser while searching
-//      - Enter not working
-//      - j/k still navigating, cannot be use for writing
-//      - pressing enter, just quit the filtering, but doesn't do anything.
+//  - FileBrowser search should still be able to use up and down for navigating
 //  - Ordering seperate between upper and lower case. Should not be the case.
-//  - use title and authors for refetch_metadata if doi missing
 //  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
-//  - import bib multiple and single need testing.
+//  - import bib multiple need testing.
 //
 
 fn main() -> Result<()> {
