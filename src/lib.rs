@@ -35,6 +35,25 @@ fn uuid_fallback() -> String {
         .unwrap_or_else(|_| "dup".to_string())
 }
 
+/// Strip JATS XML tags (e.g. `<jats:p>`, `<jats:title>`, `<jats:italic>`) that
+/// Crossref wraps abstracts in, plus any other XML/HTML tags, and decode the
+/// handful of named entities that show up in practice. Whitespace is collapsed
+/// so paragraph breaks don't leave ragged gaps in the rendered details panel.
+pub fn clean_jats(s: &str) -> String {
+    let tag_re = Regex::new(r"<[^>]+>").unwrap();
+    let ws_re  = Regex::new(r"\s+").unwrap();
+    let stripped = tag_re.replace_all(s, " ");
+    let decoded = stripped
+        .replace("&amp;",  "&")
+        .replace("&lt;",   "<")
+        .replace("&gt;",   ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;",  "'")
+        .replace("&nbsp;", " ");
+    ws_re.replace_all(&decoded, " ").trim().to_string()
+}
+
 pub type ProjectsMap = HashMap<String, Vec<String>>;
 
 pub fn chunks_to_string(chunks: &[Spanned<Chunk>]) -> String {
@@ -227,7 +246,7 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     let abstract_text = work
         .abstract_
         .as_ref()
-        .map(|s| s.clone())
+        .map(|s| clean_jats(s))
         .unwrap_or_default();
 
     // 4. Citation key
@@ -397,75 +416,76 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
     let import_bib = Bibliography::parse(&import_content)?;
 
     let all_content = fs::read_to_string(all_bib_path).unwrap_or_default();
-    let mut all_bib = if all_content.is_empty() {
+    let mut all_bib = if all_content.trim().is_empty() {
         Bibliography::new()
     } else {
         Bibliography::parse(&all_content)?
     };
 
+    let normalize_doi = |s: &str| -> String {
+        let lower = s.trim().to_lowercase();
+        lower
+            .strip_prefix("https://doi.org/")
+            .or_else(|| lower.strip_prefix("http://doi.org/"))
+            .unwrap_or(&lower)
+            .to_string()
+    };
+
+    let entry_doi = |e: &Entry| -> Option<String> {
+        e.get("doi")
+            .map(|c| normalize_doi(&chunks_to_string(c)))
+            .filter(|s| !s.is_empty())
+    };
+
+    let entry_title = |e: &Entry| -> Option<String> {
+        e.get("title")
+            .map(|c| chunks_to_string(c).trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+    };
+
+    let entry_first_author = |e: &Entry| -> Option<String> {
+        e.author().ok()
+            .and_then(|a| a.into_iter().next())
+            .map(|p| p.name.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+    };
+
     let mut keys = Vec::new();
 
     for entry in import_bib.iter() {
-        // Try to find an existing entry in all.bib:
-        // 1. Match by DOI (normalised) if present
-        // 2. Fall back to matching by key
-        let existing_key = if let Some(doi_chunks) = entry.get("doi") {
-            let doi = chunks_to_string(doi_chunks).to_lowercase();
-            all_bib.iter().find(|e| {
-                e.get("doi")
-                    .map(|c| {
-                        let stored = chunks_to_string(c).to_lowercase();
-                        stored == doi
-                    })
-                    .unwrap_or(false)
-            })
-            .map(|e| e.key.clone())
+        let existing_key: Option<String> = if let Some(doi) = entry_doi(entry) {
+            all_bib.iter()
+                .find(|e| entry_doi(e).as_deref() == Some(doi.as_str()))
+                .map(|e| e.key.clone())
+        } else if let Some(title) = entry_title(entry) {
+            let author = entry_first_author(entry);
+            all_bib.iter()
+                .find(|e| {
+                    entry_title(e).as_deref() == Some(title.as_str())
+                        && entry_first_author(e) == author
+                })
+                .map(|e| e.key.clone())
         } else {
             all_bib.get(&entry.key).map(|e| e.key.clone())
         };
 
         let key = if let Some(k) = existing_key {
-            // Already in all.bib — use the canonical key from all.bib
             k
         } else {
-            let has_doi = entry.get("doi")
-                .map(|c| !chunks_to_string(c).trim().is_empty())
-                .unwrap_or(false);
-
-            if !has_doi {
-                let title = entry.get("title")
-                    .map(|c| chunks_to_string(c))
-                    .unwrap_or_default();
-                let author = entry.author().ok()
-                    .and_then(|a| a.into_iter().next())
-                    .map(|a| a.name.clone())
-                    .unwrap_or_default();
-
-                if !title.is_empty() {
-                    // Try fetching full metadata; fall back to inserting as-is
-                    match add_reference_by_metadata(all_bib_path, &title, &author) {
-                        Ok(fetched_key) => {
-                            // add_reference already wrote to disk, re-parse
-                            // so subsequent iterations see the updated bib
-                            let refreshed = fs::read_to_string(all_bib_path)?;
-                            all_bib = Bibliography::parse(&refreshed)?;
-                            fetched_key
-                        }
-                        Err(_e) => {
-                            // Crossref lookup failed — insert the entry as-is
-                            all_bib.insert(entry.clone());
-                            entry.key.clone()
-                        }
-                    }
-                } else {
-                    all_bib.insert(entry.clone());
-                    entry.key.clone()
-                }
+            let base = entry.key.clone();
+            let new_key = if all_bib.get(&base).is_none() {
+                base
             } else {
-                // Not in all.bib — add it
-                all_bib.insert(entry.clone());
-                entry.key.clone()
-        }
+                ('a'..='z')
+                    .map(|c| format!("{}{}", base, c))
+                    .find(|cand| all_bib.get(cand).is_none())
+                    .unwrap_or_else(|| format!("{}_{}", base, uuid_fallback()))
+            };
+
+            let mut new_entry = entry.clone();
+            new_entry.key = new_key.clone();
+            all_bib.insert(new_entry);
+            new_key
         };
 
         keys.push(key);
@@ -503,6 +523,31 @@ pub fn delete_project(proj_map_path: &str, project: &str) -> Result<()> {
     Ok(())
 }
 
+/// Query Crossref's `/works` endpoint by title (+ optional author) and return
+/// the first matching DOI. Used by `refetch_metadata` for entries without a
+/// stored DOI and by `add_reference_by_metadata` for ad-hoc lookups.
+pub fn lookup_doi_by_metadata(title: &str, author: &str) -> Result<String> {
+    let query = if author.trim().is_empty() {
+        title.to_string()
+    } else {
+        format!("{} {}", title, author)
+    };
+
+    let url = format!(
+        "https://api.crossref.org/works?query={}&rows=1&select=DOI",
+        urlencoding::encode(&query)
+    );
+
+    let resp: serde_json::Value = blocking::get(&url)?.json()?;
+
+    resp["message"]["items"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["DOI"].as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("No Crossref result for: {}", title))
+}
+
 pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
     let content = fs::read_to_string(all_bib_path)?;
     let mut bib = Bibliography::parse(&content)?;
@@ -511,46 +556,30 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))?
         .clone();
 
-    // Get DOI from entry — bail early if none
-    let doi = {
-        let stored = entry.get("doi")
+    let stored_doi = entry.get("doi")
+        .map(|c| chunks_to_string(c))
+        .filter(|s| !s.trim().is_empty());
+
+    let (doi, doi_was_missing) = if let Some(stored) = stored_doi {
+        let cleaned = stored
+            .strip_prefix("https://doi.org/")
+            .or_else(|| stored.strip_prefix("http://doi.org/"))
+            .unwrap_or(&stored)
+            .to_string();
+        (cleaned, false)
+    } else {
+        let title = entry.get("title")
             .map(|c| chunks_to_string(c))
-            .filter(|s| !s.is_empty());
-        if let Some(doi) = stored {
-            doi.strip_prefix("https://doi.org/")
-                .or_else(|| doi.strip_prefix("http://doi.org/"))
-                .unwrap_or(&doi)
-                .to_string()
-        } else {
-                // No DOI — look up via title + author
-                let title = entry.get("title")
-                    .map(|c| chunks_to_string(c))
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("No DOI or title found for '{}'", key))?;
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("No DOI or title found for '{}'", key))?;
 
-                let author = entry.author().ok()
-                    .and_then(|a| a.into_iter().next())
-                    .map(|a| a.name.clone())
-                    .unwrap_or_default();
+        let author = entry.author().ok()
+            .and_then(|a| a.into_iter().next())
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
 
-                let query = format!("{} {}", title, author);
-                let url = format!(
-                    "https://api.crossref.org/works?query={}&rows=1&select=DOI",
-                    urlencoding::encode(&query)
-                );
-
-                let resp: serde_json::Value = blocking::get(&url)?.json()?;
-
-                resp["message"]["items"]
-                    .as_array()
-                    .and_then(|items| items.first())
-                    .and_then(|item| item["DOI"].as_str())
-                    .ok_or_else(|| anyhow::anyhow!("No Crossref result found for '{}'", key))?
-                    .to_string()
-        }
+        (lookup_doi_by_metadata(&title, &author)?, true)
     };
-
-    // Strip https://doi.org/ prefix if present
 
     let client = Crossref::builder()
         .build()
@@ -569,9 +598,13 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
             .unwrap_or(true)
     };
 
+    if doi_was_missing {
+        entry.set("doi", field(&doi));
+    }
+
     if is_empty(entry, "abstract") {
         if let Some(abs) = &work.abstract_ {
-            entry.set("abstract", field(abs));
+            entry.set("abstract", field(&clean_jats(abs)));
         }
     }
 
@@ -818,27 +851,253 @@ pub fn add_reference_by_metadata(all_bib: &str, title: &str, author: &str) -> Re
         return Ok(existing.key.clone());
     }
 
-    // Query Crossref by title + author
-    let query = if author.is_empty() {
-        title.to_string()
-    } else {
-        format!("{} {}", title, author)
-    };
-
-    let url = format!(
-        "https://api.crossref.org/works?query={}&rows=1&select=DOI",
-        urlencoding::encode(&query)
-    );
-
-    let resp: serde_json::Value = blocking::get(&url)?.json()?;
-
-    let doi = resp["message"]["items"]
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(|item| item["DOI"].as_str())
-        .ok_or_else(|| anyhow::anyhow!("No Crossref result for: {}", title))?
-        .to_string();
-
-    // Now fetch full metadata via the found DOI
+    let doi = lookup_doi_by_metadata(title, author)?;
     add_reference(all_bib, &doi)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::path::Path;
+
+    fn write_file(dir: &Path, name: &str, content: &str) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn parse_one(s: &str) -> Entry {
+        Bibliography::parse(s).unwrap().iter().next().unwrap().clone()
+    }
+
+    // ── entry_matches ────────────────────────────────────────────────────────
+
+    #[test]
+    fn entry_matches_title_is_case_insensitive_substring() {
+        let e = parse_one("@article{a, title = {The CRISPR System}, author = {Jane Doe}}");
+        assert!(entry_matches(&e, "crispr"));
+        assert!(entry_matches(&e, "CRISPR"));
+        assert!(entry_matches(&e, "system"));
+        assert!(!entry_matches(&e, "ribosome"));
+    }
+
+    #[test]
+    fn entry_matches_author_surname_or_given() {
+        let e = parse_one("@article{a, title = {X}, author = {Jane Doe and John Smith}}");
+        assert!(entry_matches(&e, "doe"));
+        assert!(entry_matches(&e, "smith"));
+        assert!(entry_matches(&e, "jane"));
+        assert!(!entry_matches(&e, "wong"));
+    }
+
+    // ── project map CRUD ─────────────────────────────────────────────────────
+
+    #[test]
+    fn projects_save_and_load_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("p.json").to_string_lossy().to_string();
+        let mut map = ProjectsMap::new();
+        map.insert("alpha".into(), vec!["k1".into(), "k2".into()]);
+        save_projects_map(&path, &map).unwrap();
+        assert_eq!(load_projects_map(&path).unwrap(), map);
+    }
+
+    #[test]
+    fn projects_load_missing_file_returns_empty_map() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nope.json").to_string_lossy().to_string();
+        assert!(load_projects_map(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn projects_load_empty_file_returns_empty_map() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "p.json", "");
+        assert!(load_projects_map(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_to_project_creates_and_dedupes() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "p.json", "{}");
+        add_to_project(&path, "alpha", "k1").unwrap();
+        add_to_project(&path, "alpha", "k1").unwrap(); // duplicate ignored
+        add_to_project(&path, "alpha", "k2").unwrap();
+        let map = load_projects_map(&path).unwrap();
+        assert_eq!(map.get("alpha"), Some(&vec!["k1".into(), "k2".into()]));
+    }
+
+    #[test]
+    fn remove_from_project_drops_key() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "p.json", "{}");
+        add_to_project(&path, "alpha", "k1").unwrap();
+        add_to_project(&path, "alpha", "k2").unwrap();
+        remove_from_project(&path, "alpha", "k1").unwrap();
+        let map = load_projects_map(&path).unwrap();
+        assert_eq!(map.get("alpha"), Some(&vec!["k2".into()]));
+    }
+
+    #[test]
+    fn rename_project_moves_keys() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "p.json", "{}");
+        add_to_project(&path, "old", "k").unwrap();
+        rename_project(&path, "old", "new").unwrap();
+        let map = load_projects_map(&path).unwrap();
+        assert!(!map.contains_key("old"));
+        assert_eq!(map.get("new"), Some(&vec!["k".into()]));
+    }
+
+    #[test]
+    fn rename_project_rejects_existing_target() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "p.json", "{}");
+        add_to_project(&path, "a", "k").unwrap();
+        add_to_project(&path, "b", "k").unwrap();
+        assert!(rename_project(&path, "a", "b").is_err());
+    }
+
+    #[test]
+    fn delete_project_removes_entry() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "p.json", "{}");
+        add_to_project(&path, "doomed", "k").unwrap();
+        delete_project(&path, "doomed").unwrap();
+        assert!(!load_projects_map(&path).unwrap().contains_key("doomed"));
+    }
+
+    // ── find_existing_by_doi ─────────────────────────────────────────────────
+
+    #[test]
+    fn find_existing_by_doi_matches_url_and_bare() {
+        let dir = tempdir().unwrap();
+        let bib = "@article{smith_2020, title = {T}, author = {Smith}, doi = {https://doi.org/10.1000/A}}\n\
+                   @article{doe_2021, title = {U}, author = {Doe}, doi = {10.1000/B}}";
+        let path = write_file(dir.path(), "all.bib", bib);
+        assert_eq!(find_existing_by_doi(&path, "10.1000/a"), Some("smith_2020".into()));
+        assert_eq!(find_existing_by_doi(&path, "10.1000/b"), Some("doe_2021".into()));
+        assert_eq!(find_existing_by_doi(&path, "10.9999/missing"), None);
+    }
+
+    // ── import_bib_file ──────────────────────────────────────────────────────
+
+    #[test]
+    fn import_into_empty_all_bib_inserts_entry() {
+        let dir = tempdir().unwrap();
+        let all = write_file(dir.path(), "all.bib", "");
+        let imp = write_file(
+            dir.path(),
+            "in.bib",
+            "@article{smith_2020, title = {Hello}, author = {Smith}, doi = {10.1000/a}}",
+        );
+        let keys = import_bib_file(&all, &imp).unwrap();
+        assert_eq!(keys, vec!["smith_2020".to_string()]);
+        let after = Bibliography::parse(&std::fs::read_to_string(&all).unwrap()).unwrap();
+        assert_eq!(after.iter().count(), 1);
+        assert!(after.get("smith_2020").is_some());
+    }
+
+    #[test]
+    fn import_dedupes_by_doi_across_url_and_bare_form() {
+        let dir = tempdir().unwrap();
+        let all = write_file(
+            dir.path(),
+            "all.bib",
+            "@article{smith_2020, title = {Hello}, author = {Smith}, doi = {https://doi.org/10.1000/A}}",
+        );
+        let imp = write_file(
+            dir.path(),
+            "in.bib",
+            "@article{some_other_key, title = {Hello again}, author = {Smith}, doi = {10.1000/a}}",
+        );
+        let keys = import_bib_file(&all, &imp).unwrap();
+        assert_eq!(keys, vec!["smith_2020".to_string()]);
+        let after = Bibliography::parse(&std::fs::read_to_string(&all).unwrap()).unwrap();
+        assert_eq!(after.iter().count(), 1);
+    }
+
+    #[test]
+    fn import_dedupes_by_title_and_first_author_when_no_doi() {
+        let dir = tempdir().unwrap();
+        let all = write_file(
+            dir.path(),
+            "all.bib",
+            "@article{smith_2020, title = {The Big Discovery}, author = {Jane Smith}}",
+        );
+        let imp = write_file(
+            dir.path(),
+            "in.bib",
+            "@article{different_key, title = {The Big Discovery}, author = {Jane Smith}}",
+        );
+        let keys = import_bib_file(&all, &imp).unwrap();
+        assert_eq!(keys, vec!["smith_2020".to_string()]);
+        let after = Bibliography::parse(&std::fs::read_to_string(&all).unwrap()).unwrap();
+        assert_eq!(after.iter().count(), 1);
+    }
+
+    #[test]
+    fn import_inserts_when_no_match_found() {
+        let dir = tempdir().unwrap();
+        let all = write_file(
+            dir.path(),
+            "all.bib",
+            "@article{smith_2020, title = {A}, author = {Smith}, doi = {10.1000/a}}",
+        );
+        let imp = write_file(
+            dir.path(),
+            "in.bib",
+            "@article{doe_2021, title = {B}, author = {Doe}, doi = {10.1000/b}}",
+        );
+        let keys = import_bib_file(&all, &imp).unwrap();
+        assert_eq!(keys, vec!["doe_2021".to_string()]);
+        let after = Bibliography::parse(&std::fs::read_to_string(&all).unwrap()).unwrap();
+        assert_eq!(after.iter().count(), 2);
+        assert!(after.get("smith_2020").is_some());
+        assert!(after.get("doe_2021").is_some());
+    }
+
+    #[test]
+    fn import_suffixes_key_when_collision_but_distinct_entry() {
+        let dir = tempdir().unwrap();
+        let all = write_file(
+            dir.path(),
+            "all.bib",
+            "@article{smith_2020, title = {A paper}, author = {Smith}, doi = {10.1000/a}}",
+        );
+        // Same key but distinct DOI and title — should not overwrite.
+        let imp = write_file(
+            dir.path(),
+            "in.bib",
+            "@article{smith_2020, title = {Another paper}, author = {Jones}, doi = {10.1000/b}}",
+        );
+        let keys = import_bib_file(&all, &imp).unwrap();
+        assert_eq!(keys, vec!["smith_2020a".to_string()]);
+        let after = Bibliography::parse(&std::fs::read_to_string(&all).unwrap()).unwrap();
+        assert_eq!(after.iter().count(), 2);
+        let original = after.get("smith_2020").unwrap();
+        assert_eq!(
+            chunks_to_string(original.get("doi").unwrap()).to_lowercase(),
+            "10.1000/a"
+        );
+    }
+
+    #[test]
+    fn import_returns_canonical_keys_in_input_order() {
+        let dir = tempdir().unwrap();
+        let all = write_file(
+            dir.path(),
+            "all.bib",
+            "@article{smith_2020, title = {Hello}, author = {Smith}, doi = {10.1000/a}}",
+        );
+        let imp = write_file(
+            dir.path(),
+            "in.bib",
+            "@article{x, title = {Hello}, author = {Smith}, doi = {10.1000/A}}\n\
+             @article{doe_2021, title = {New}, author = {Doe}, doi = {10.1000/b}}",
+        );
+        let keys = import_bib_file(&all, &imp).unwrap();
+        assert_eq!(keys, vec!["smith_2020".to_string(), "doe_2021".to_string()]);
+    }
 }

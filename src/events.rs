@@ -305,6 +305,9 @@ pub fn handle_key(
                     }
                 }
                 app.load_references();
+                if let Some(idx) = app.references.iter().position(|e| e.key == key) {
+                    app.selected_reference = idx;
+                }
             }
         }
 
@@ -318,6 +321,7 @@ pub fn handle_key(
             if let Some(entry) = active_refs.get(app.selected_reference) {
                 let key          = entry.key.clone();
                 let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                app.log(&format!("Refetching metadata for '{}'", key));
                 app.suspend_tui().ok();
                 println!("Fetching metadata for '{}'...", key);
                 let result = refetch_metadata(&all_bib_path, &key);
@@ -329,9 +333,13 @@ pub fn handle_key(
                         if let Some(idx) = app.references.iter().position(|e| e.key == key) {
                             app.selected_reference = idx;
                         }
+                        app.log(&format!("  Metadata updated for '{}'", key));
                         app.show_alert(&format!("Metadata updated for '{}'", key));
                     }
-                    Err(e) => app.show_alert(&format!("Fetch failed: {e}")),
+                    Err(e) => {
+                        app.log(&format!("  Fetch failed for '{}': {}", key, e));
+                        app.show_alert(&format!("Fetch failed: {e}"));
+                    }
                 }
             }
             app.search_query.clear();
