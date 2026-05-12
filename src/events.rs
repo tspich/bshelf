@@ -511,6 +511,24 @@ pub fn handle_key(
             }
         }
 
+        // ── Copy whole bib entry to clipboard ─────────────────────────────────
+        KeyCode::Char('C') if matches!(app.mode, Mode::Normal) => {
+            let active_refs = if !app.search_query.is_empty() {
+                &app.filtered_refs
+            } else {
+                &app.references
+            };
+            if let Some(entry) = active_refs.get(app.selected_reference) {
+                let key = entry.key.clone();
+                let bib_str = entry.to_biblatex_string();
+                match app.clipboard.as_mut().map(|cb| cb.set_text(&bib_str)) {
+                    Some(Ok(_))  => app.show_alert(&format!("Copied entry '{}' to clipboard", key)),
+                    Some(Err(e)) => app.show_alert(&format!("Clipboard error: {e}")),
+                    None         => app.show_alert("Clipboard not available"),
+                }
+            }
+        }
+
         // ── PDF DOI manual entry ───────────────────────────────────────────────
         KeyCode::Char(c) if matches!(app.mode, Mode::PdfDoi) => {
             app.pdf_doi_input.push(c);
