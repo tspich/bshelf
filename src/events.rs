@@ -279,7 +279,9 @@ pub fn handle_key(
         // ── Edit reference in $EDITOR ─────────────────────────────────────────
         // TODO: One should be able to set the editor in the config file
         KeyCode::Char('e') if matches!(app.mode, Mode::Normal) => {
-            if let Some(entry) = app.references.get(app.selected_reference) {
+            let search_active = !app.search_query.is_empty();
+            let active_refs = if search_active { &app.filtered_refs } else { &app.references };
+            if let Some(entry) = active_refs.get(app.selected_reference) {
                 let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
                 let key = entry.key.clone();
                 app.suspend_tui().ok();
@@ -305,7 +307,12 @@ pub fn handle_key(
                     }
                 }
                 app.load_references();
-                if let Some(idx) = app.references.iter().position(|e| e.key == key) {
+                if search_active {
+                    app.apply_search_live();
+                    if let Some(idx) = app.filtered_refs.iter().position(|e| e.key == key) {
+                        app.selected_reference = idx;
+                    }
+                } else if let Some(idx) = app.references.iter().position(|e| e.key == key) {
                     app.selected_reference = idx;
                 }
             }
@@ -498,6 +505,24 @@ pub fn handle_key(
                 let key = entry.key.clone();
                 match app.clipboard.as_mut().map(|cb| cb.set_text(&key)) {
                     Some(Ok(_))  => app.show_alert(&format!("Copied '{}' to clipboard", key)),
+                    Some(Err(e)) => app.show_alert(&format!("Clipboard error: {e}")),
+                    None         => app.show_alert("Clipboard not available"),
+                }
+            }
+        }
+
+        // ── Copy whole bib entry to clipboard ─────────────────────────────────
+        KeyCode::Char('C') if matches!(app.mode, Mode::Normal) => {
+            let active_refs = if !app.search_query.is_empty() {
+                &app.filtered_refs
+            } else {
+                &app.references
+            };
+            if let Some(entry) = active_refs.get(app.selected_reference) {
+                let key = entry.key.clone();
+                let bib_str = entry.to_biblatex_string();
+                match app.clipboard.as_mut().map(|cb| cb.set_text(&bib_str)) {
+                    Some(Ok(_))  => app.show_alert(&format!("Copied entry '{}' to clipboard", key)),
                     Some(Err(e)) => app.show_alert(&format!("Clipboard error: {e}")),
                     None         => app.show_alert("Clipboard not available"),
                 }
