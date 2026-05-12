@@ -19,9 +19,7 @@ use app::App;
 //  - Get DOI from PDF can be very tedious, need to be careful
 //
 // TODO:
-//  - FileBrowser search should still be able to use up and down for navigating
 //  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
-//  - import bib file not working as expected.
 //  - import bib multiple need testing.
 //  - While refetching data, should also check if the reference is not already
 //    in the bookshelf, if yes keep only one.
