@@ -160,6 +160,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_confirm_remove_ref(f, app);
     }
 
+    if matches!(app.mode, Mode::ConfirmReplacePdf) {
+        draw_confirm_replace_pdf(f, app);
+    }
+
     if matches!(app.mode, Mode::FileBrowser) {
         draw_file_browser(f, app);
     }
@@ -336,6 +340,48 @@ fn draw_confirm_delete(f: &mut Frame, app: &App) {
 // ---------------------------------------------------------------------------
 // Helper: confirm-remove-ref popup
 // ---------------------------------------------------------------------------
+
+fn draw_confirm_replace_pdf(f: &mut Frame, app: &App) {
+    let (key, source) = match &app.pending_replace_pdf {
+        Some((k, p)) => (k.as_str(), p.as_path()),
+        None => return,
+    };
+    let source_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?");
+
+    let msg = format!(
+        "PDF already linked for '{}'. Overwrite with '{}'? (y/n)",
+        key, source_name
+    );
+
+    let size = f.size();
+    let width = ((size.width * 2) / 3).max(20);
+    let inner_w = width.saturating_sub(2).max(1) as usize;
+    // Borders (2) + however many wrapped lines the message needs.
+    let needed_lines = msg.chars().count().div_ceil(inner_w) as u16;
+    let max_h = size.height.saturating_sub(4).max(3);
+    let height = (needed_lines + 2).clamp(3, max_h);
+
+    let area = Rect {
+        x: (size.width.saturating_sub(width)) / 2,
+        y: size.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+    let confirm = Paragraph::new(msg)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .title(" Confirm replace ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red)),
+        );
+    f.render_widget(confirm, area);
+}
 
 fn draw_confirm_remove_ref(f: &mut Frame, app: &App) {
     let active_refs = if !app.filtered_refs.is_empty() {

@@ -670,34 +670,37 @@ pub fn extract_doi_from_pdf(pdf_path: &str) -> Option<String> {
         .map(|m| m.as_str().trim_end_matches('.').to_string())
 }
 
-pub fn link_pdf_to_entry(all_bib_path: &str, pdfs_dir: &str, key: &str, pdf_path: &str) -> Result<()> {
+/// Compute the would-be destination path for an entry's PDF.
+/// Callers can use this to check `dest.exists()` before calling
+/// `link_pdf_to_entry`, so they can ask the user before overwriting.
+pub fn pdf_dest_for_entry(all_bib_path: &str, pdfs_dir: &str, key: &str) -> Result<PathBuf> {
     let content = fs::read_to_string(all_bib_path)?;
-    let mut bib = Bibliography::parse(&content)?;
+    let bib = Bibliography::parse(&content)?;
 
-    let entry = bib.get_mut(key)
+    let entry = bib.get(key)
         .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))?;
 
-    // Get DOI to use as filename
     let doi = entry.get("doi")
         .map(|c| chunks_to_string(c))
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("No DOI found for '{}'", key))?;
 
-    // Sanitize DOI for use as filename
     let filename = doi
         .strip_prefix("https://doi.org/")
         .or_else(|| doi.strip_prefix("http://doi.org/"))
         .unwrap_or(&doi)
         .replace('/', "-");
 
+    Ok(PathBuf::from(pdfs_dir).join(format!("{filename}.pdf")))
+}
+
+pub fn link_pdf_to_entry(all_bib_path: &str, pdfs_dir: &str, key: &str, pdf_path: &str, overwrite: bool) -> Result<()> {
+    let dest = pdf_dest_for_entry(all_bib_path, pdfs_dir, key)?;
     fs::create_dir_all(pdfs_dir)?;
-    let dest = std::path::PathBuf::from(pdfs_dir).join(format!("{filename}.pdf"));
-
-    // Only copy if not already there
-    if !dest.exists() {
-        fs::copy(pdf_path, &dest)?;
+    if dest.exists() && !overwrite {
+        return Ok(());
     }
-
+    fs::copy(pdf_path, &dest)?;
     Ok(())
 }
 

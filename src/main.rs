@@ -22,7 +22,10 @@ use app::App;
 //  - Using direct link to pdf, download the pdf and store it as {doi}.pdf
 //  - import bib multiple need testing.
 //  - While refetching data, should also check if the reference is not already
-//    in the bookshelf, if yes keep only one.
+//    in the bookshelf, if yes keep only one. -> Should be working
+//  - using 'M' to add ref to project, should be possible to add it to
+//    a new project.
+//  - possible to have a nicer dialog window for 'M', 'N', 'R', and 'A'
 //
 
 fn main() -> Result<()> {
@@ -45,7 +48,7 @@ fn main() -> Result<()> {
 
         if crossterm::event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                if events::handle_key(&mut app, key.code, &mut terminal) {
+                if events::handle_key(&mut app, key.code, key.modifiers, &mut terminal) {
                     break;
                 }
             }

@@ -1,5 +1,5 @@
 use biblatex::Bibliography;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::{fs, io};
@@ -13,6 +13,7 @@ use bshelf::{
     find_existing_by_doi,
     import_bib_file,
     link_pdf_to_entry,
+    pdf_dest_for_entry,
     refetch_metadata,
     remove_from_project,
     rename_project
@@ -26,8 +27,10 @@ use crate::app::{App, FileBrowser, FileBrowserMode, Mode};
 pub fn handle_key(
     app: &mut App,
     key: KeyCode,
+    modifiers: KeyModifiers,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> bool {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match key {
         // ── Quit ────────────────────────────────────────────────────────────
         KeyCode::Char('q') if matches!(app.mode, Mode::Normal) => return true,
@@ -205,6 +208,21 @@ pub fn handle_key(
             app.detail_scroll = 0;
         }
 
+        // ── Page-wise reference scroll (vim-style C-d / C-u) ─────────────────
+        KeyCode::Char('d') if ctrl && matches!(app.mode, Mode::Normal) => {
+            let len = if !app.search_query.is_empty() { app.filtered_refs.len() } else { app.references.len() };
+            if len > 0 {
+                let step = (app.ref_panel_visible / 2).max(1);
+                app.selected_reference = (app.selected_reference + step).min(len - 1);
+                app.detail_scroll = 0;
+            }
+        }
+        KeyCode::Char('u') if ctrl && matches!(app.mode, Mode::Normal) => {
+            let step = (app.ref_panel_visible / 2).max(1);
+            app.selected_reference = app.selected_reference.saturating_sub(step);
+            app.detail_scroll = 0;
+        }
+
         // ── Detail panel scroll ───────────────────────────────────────────────
         KeyCode::Char('u') if matches!(app.mode, Mode::Normal) => {
             app.detail_scroll = app.detail_scroll.saturating_sub(3);
@@ -370,6 +388,25 @@ pub fn handle_key(
             app.mode = Mode::FileBrowser;
         }
 
+        // ── Link PDF to the currently-selected reference ──────────────────────
+        KeyCode::Char('p') if matches!(app.mode, Mode::Normal) => {
+            let active_refs = if !app.search_query.is_empty() {
+                &app.filtered_refs
+            } else {
+                &app.references
+            };
+            if let Some(entry) = active_refs.get(app.selected_reference) {
+                let key = entry.key.clone();
+                app.pending_link_key = Some(key);
+                let start = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                app.file_browser = Some(FileBrowser::new(start, FileBrowserMode::Pdf));
+                app.mode = Mode::FileBrowser;
+            } else {
+                app.show_alert("No reference selected");
+            }
+        }
+
         // ── Delete reference from project ─────────────────────────────────────
         KeyCode::Char('D') if matches!(app.mode, Mode::Normal) => {
             let current = &app.projects[app.selected_project];
@@ -403,6 +440,32 @@ pub fn handle_key(
             if matches!(app.mode, Mode::ConfirmRemoveRef) =>
         {
             app.show_alert("Removal cancelled");
+            app.mode = Mode::Normal;
+        }
+
+        // ── Confirm PDF replacement (`p` linked PDF already exists) ──────────
+        KeyCode::Char('y') | KeyCode::Char('Y') if matches!(app.mode, Mode::ConfirmReplacePdf) => {
+            if let Some((key, source)) = app.pending_replace_pdf.take() {
+                let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                let pdfs_dir     = app.config.pdfs_dir.to_string_lossy().to_string();
+                let pdf_str      = source.to_string_lossy().to_string();
+                app.log(&format!("Replacing PDF for '{}' with {}", key, source.display()));
+                match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str, true) {
+                    Ok(_)  => app.show_alert(&format!("Replaced PDF for '{}'", key)),
+                    Err(e) => app.show_alert(&format!("PDF replace failed: {e}")),
+                }
+                app.load_references();
+                if let Some(idx) = app.references.iter().position(|e| e.key == key) {
+                    app.selected_reference = idx;
+                }
+            }
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
+            if matches!(app.mode, Mode::ConfirmReplacePdf) =>
+        {
+            app.pending_replace_pdf = None;
+            app.show_alert("PDF replacement cancelled");
             app.mode = Mode::Normal;
         }
 
@@ -551,8 +614,14 @@ pub fn handle_key(
                     let pdfs_dir      = app.config.pdfs_dir.to_string_lossy().to_string();
 
                     app.suspend_tui().ok();
-                    println!("Fetching metadata for DOI: {doi}...");
-                    let result = add_reference(&all_bib_path, &doi);
+                    let result = if let Some(key) = find_existing_by_doi(&all_bib_path, &doi) {
+                        println!("DOI {doi} already in your shelf as '{key}'");
+                        app.log(&format!("  DOI {} already in your shelf as '{}'", doi, key));
+                        Ok(key)
+                    } else {
+                        println!("Fetching metadata for DOI: {doi}...");
+                        add_reference(&all_bib_path, &doi)
+                    };
                     app.resume_tui().ok();
                     terminal.clear().ok();
 
@@ -562,7 +631,7 @@ pub fn handle_key(
                             if current != "all" {
                                 let _ = add_to_project(&proj_map_path, &current, &key);
                             }
-                            match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str) {
+                            match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str, false) {
                                 Ok(_)  => app.show_alert(&format!("Linked PDF to '{}'", key)),
                                 Err(e) => app.show_alert(&format!("PDF copy failed: {e}")),
                             }
@@ -594,6 +663,7 @@ pub fn handle_key(
                     fb.selected = 0;
                 } else {
                     app.file_browser = None;
+                    app.pending_link_key = None;
                     app.mode = Mode::Normal;
                 }
             }
@@ -748,6 +818,36 @@ fn handle_file_browser_enter(
     if !multi.is_empty() {
         app.file_browser = None;
 
+        // Link-only path (`p`): use the first PDF, ignore the rest.
+        if let Some(key) = app.pending_link_key.take() {
+            let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+            let pdfs_dir     = app.config.pdfs_dir.to_string_lossy().to_string();
+            if let Some(path) = multi.iter().find(|p| p.extension().and_then(|e| e.to_str()) == Some("pdf")) {
+                let pdf_str = path.to_string_lossy().to_string();
+                let exists = pdf_dest_for_entry(&all_bib_path, &pdfs_dir, &key)
+                    .map(|d| d.exists())
+                    .unwrap_or(false);
+                if exists {
+                    app.pending_replace_pdf = Some((key, path.clone()));
+                    app.mode = Mode::ConfirmReplacePdf;
+                    return;
+                }
+                app.log(&format!("Linking PDF {} to '{}'", path.display(), key));
+                match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str, false) {
+                    Ok(_)  => app.show_alert(&format!("Linked PDF to '{}'", key)),
+                    Err(e) => app.show_alert(&format!("PDF link failed: {e}")),
+                }
+                app.load_references();
+                if let Some(idx) = app.references.iter().position(|e| e.key == key) {
+                    app.selected_reference = idx;
+                }
+            } else {
+                app.show_alert("No PDF selected");
+            }
+            app.mode = Mode::Normal;
+            return;
+        }
+
         for path in multi {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             match ext {
@@ -783,7 +883,7 @@ fn handle_file_browser_enter(
                                     if current != "all" {
                                         let _ = add_to_project(&proj_map_path, &current, &key);
                                     }
-                                    let _ = link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str);
+                                    let _ = link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str, false);
                                     println!("  ✓ Added as '{key}'");
                                     app.log(&format!("  Added as '{}'", key));
                                 }
@@ -851,6 +951,29 @@ fn handle_file_browser_enter(
                 let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
                 let pdfs_dir      = app.config.pdfs_dir.to_string_lossy().to_string();
 
+                // Link-only path (`p`): skip DOI extraction and Crossref.
+                if let Some(key) = app.pending_link_key.take() {
+                    let exists = pdf_dest_for_entry(&all_bib_path, &pdfs_dir, &key)
+                        .map(|d| d.exists())
+                        .unwrap_or(false);
+                    if exists {
+                        app.pending_replace_pdf = Some((key, path.clone()));
+                        app.mode = Mode::ConfirmReplacePdf;
+                        return;
+                    }
+                    app.log(&format!("Linking PDF {} to '{}'", path.display(), key));
+                    match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str, false) {
+                        Ok(_)  => app.show_alert(&format!("Linked PDF to '{}'", key)),
+                        Err(e) => app.show_alert(&format!("PDF link failed: {e}")),
+                    }
+                    app.load_references();
+                    if let Some(idx) = app.references.iter().position(|e| e.key == key) {
+                        app.selected_reference = idx;
+                    }
+                    app.mode = Mode::Normal;
+                    return;
+                }
+
                 app.log(&format!("Processing PDF: {}", path.display()));
 
                 app.suspend_tui().ok();
@@ -883,7 +1006,7 @@ fn handle_file_browser_enter(
                                 if current != "all" {
                                     let _ = add_to_project(&proj_map_path, &current, &key);
                                 }
-                                match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str) {
+                                match link_pdf_to_entry(&all_bib_path, &pdfs_dir, &key, &pdf_str, false) {
                                     Ok(_)  => {
                                         app.show_alert(&format!("Linked PDF to '{}'", key));
                                         app.log(&format!("  Added as '{}', linked PDF", key));

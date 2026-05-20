@@ -15,7 +15,7 @@ pub fn mode_color(mode: &Mode) -> Color {
     match mode {
         Mode::Normal                                 => Color::Green,
         Mode::Search                                 => Color::Yellow,
-        Mode::ConfirmDelete | Mode::ConfirmRemoveRef => Color::Red,
+        Mode::ConfirmDelete | Mode::ConfirmRemoveRef | Mode::ConfirmReplacePdf => Color::Red,
         _                                            => Color::Blue,
     }
 }
@@ -37,6 +37,7 @@ pub fn help_lines() -> &'static [&'static str] {
         "  j / ↓        Next reference",
         "  k / ↑        Previous reference",
         "  d / u        Scroll details panel down / up",
+        "  Ctrl-d / -u  Page down / up in reference list",
         "  g            Jump to first reference",
         "  G            Jump to last reference",
         "",
@@ -52,6 +53,7 @@ pub fn help_lines() -> &'static [&'static str] {
         "  e             Edit reference in $EDITOR",
         "  F             Re-fetch missing metadata from Crossref",
         "  P             Import PDF and link to reference",
+        "  p             Link PDF to current reference",
         "  c             Copy the current key to the clipboard",
         "  C             Copy the whole bib entry to the clipboard",
         "  X             Delete current project",

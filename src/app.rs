@@ -35,6 +35,7 @@ pub enum Mode {
     RenameProject,
     ConfirmDelete,
     ConfirmRemoveRef,
+    ConfirmReplacePdf,
     PdfDoi,
     ImportProject,
     ImportNewProject,
@@ -51,6 +52,7 @@ pub fn mode_name(mode: &Mode) -> &'static str {
         Mode::RenameProject    => "RENAME",
         Mode::ConfirmDelete    => "DELETE PROJECT",
         Mode::ConfirmRemoveRef => "REMOVE REF",
+        Mode::ConfirmReplacePdf=> "REPLACE PDF",
         Mode::Help             => "HELP",
         Mode::PdfDoi           => "PDF",
         Mode::ImportProject    => "IMPORT TO",
@@ -202,8 +204,11 @@ pub struct App {
     pub rename_project_name: String,
     pub project_scroll: usize,
     pub ref_scroll: usize,
+    pub ref_panel_visible: usize,
     pub detail_scroll: usize,
     pub pending_pdf_path: Option<std::path::PathBuf>,
+    pub pending_link_key: Option<String>,
+    pub pending_replace_pdf: Option<(String, std::path::PathBuf)>,
     pub pdf_doi_input: String,
     pub clipboard: Option<arboard::Clipboard>,
     pub help_scroll: usize,
@@ -248,8 +253,11 @@ impl App {
             rename_project_name: String::new(),
             project_scroll: 0,
             ref_scroll: 0,
+            ref_panel_visible: 10,
             detail_scroll: 0,
             pending_pdf_path: None,
+            pending_link_key: None,
+            pending_replace_pdf: None,
             pdf_doi_input: String::new(),
             clipboard: arboard::Clipboard::new().ok(),
             help_scroll: 0,
@@ -371,6 +379,7 @@ impl App {
 
     pub fn sync_ref_scroll(&mut self, panel_height: usize) {
         let visible = panel_height.saturating_sub(2);
+        self.ref_panel_visible = visible.max(1);
         if self.selected_reference < self.ref_scroll {
             self.ref_scroll = self.selected_reference;
         } else if self.selected_reference >= self.ref_scroll + visible {
