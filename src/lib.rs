@@ -285,9 +285,12 @@ pub fn fetch_crossref_work(doi: &str) -> Result<CrossrefWork> {
     Ok(serde_json::from_value(message.clone())?)
 }
 
-/// Ask Unpaywall for an open-access PDF and store it under `pdfs/`.
-/// `Ok(None)` means there simply is no OA copy to download.
-fn fetch_oa_pdf(doi: &str, email: &str) -> Result<Option<String>> {
+/// Ask Unpaywall for an open-access PDF and write it to `dest`.
+/// `Ok(false)` means there simply is no OA copy to download.
+///
+/// `dest` comes from `pdf_dest_for_entry`, so a downloaded PDF lands exactly
+/// where the rest of bshelf looks for it.
+fn fetch_oa_pdf(doi: &str, email: &str, dest: &std::path::Path) -> Result<bool> {
     let url = format!(
         "https://api.unpaywall.org/v2/{}?email={}",
         doi.trim(),
@@ -295,27 +298,45 @@ fn fetch_oa_pdf(doi: &str, email: &str) -> Result<Option<String>> {
     );
     let up: Value = blocking::get(&url)?.json()?;
 
-    let Some(pdf_url) = up["best_oa_location"]["url_for_pdf"].as_str() else {
-        return Ok(None);
+    // Unpaywall's "best" location is often the publisher's own site, which
+    // routinely answers a bare GET with a 403 HTML page. Repository mirrors
+    // listed alongside it usually serve the file, so try them all in turn.
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push = |v: &Value| {
+        if let Some(u) = v["url_for_pdf"].as_str() {
+            let u = u.to_string();
+            if !candidates.contains(&u) {
+                candidates.push(u);
+            }
+        }
     };
-
-    let resp = blocking::get(pdf_url)?;
-    let is_pdf = resp
-        .headers()
-        .get("content-type")
-        .and_then(|h| h.to_str().ok())
-        .map(|ct| ct.contains("pdf"))
-        .unwrap_or(false);
-
-    // Publishers routinely answer with a 403 HTML page instead of the PDF.
-    if !is_pdf {
-        return Ok(None);
+    push(&up["best_oa_location"]);
+    if let Some(locations) = up["oa_locations"].as_array() {
+        for loc in locations {
+            push(loc);
+        }
     }
 
-    fs::create_dir_all("pdfs")?;
-    let path = format!("pdfs/{}.pdf", doi.replace('/', "-"));
-    fs::write(&path, resp.bytes()?)?;
-    Ok(Some(path))
+    for pdf_url in candidates.iter().take(5) {
+        let Ok(resp) = blocking::get(pdf_url) else { continue };
+        let is_pdf = resp
+            .headers()
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            .map(|ct| ct.contains("pdf"))
+            .unwrap_or(false);
+        if !is_pdf {
+            continue;
+        }
+        let Ok(bytes) = resp.bytes() else { continue };
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(dest, bytes)?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 /// Fetch `doi` from Crossref and append it to `all_bib`, returning its key.
@@ -323,8 +344,14 @@ fn fetch_oa_pdf(doi: &str, email: &str) -> Result<Option<String>> {
 /// The entry is written to disk as soon as the metadata is in hand. The
 /// Unpaywall PDF lookup that follows is strictly best-effort: it is skipped
 /// when no email is configured, and any failure in it leaves the reference
-/// saved rather than discarding it.
-pub fn add_reference(all_bib: &str, doi: &str, unpaywall_email: Option<&str>) -> Result<String> {
+/// saved rather than discarding it. A downloaded PDF goes to `pdfs_dir`, named
+/// the way `pdf_dest_for_entry` expects, so the TUI can open it straight away.
+pub fn add_reference(
+    all_bib: &str,
+    pdfs_dir: &str,
+    doi: &str,
+    unpaywall_email: Option<&str>,
+) -> Result<String> {
     // 1. Load bibliography
     let content = fs::read_to_string(&all_bib)?;
     let mut bib = Bibliography::parse(&content)?;
@@ -417,10 +444,12 @@ pub fn add_reference(all_bib: &str, doi: &str, unpaywall_email: Option<&str>) ->
 
     // 7. Unpaywall PDF — best-effort, failures are deliberately swallowed.
     if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
-        if let Ok(Some(path)) = fetch_oa_pdf(doi, email) {
-            if let Some(entry) = bib.get_mut(&key) {
-                entry.set("file", field(&path));
-                fs::write(&all_bib, bib.to_biblatex_string())?;
+        if let Ok(dest) = pdf_dest_for_entry(all_bib, pdfs_dir, &key) {
+            if let Ok(true) = fetch_oa_pdf(doi, email, &dest) {
+                if let Some(entry) = bib.get_mut(&key) {
+                    entry.set("file", field(dest.to_string_lossy()));
+                    fs::write(&all_bib, bib.to_biblatex_string())?;
+                }
             }
         }
     }
@@ -682,7 +711,17 @@ pub fn lookup_doi_by_metadata(title: &str, author: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("No Crossref result for: {}", title))
 }
 
-pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
+/// Fill in an entry's missing fields from Crossref, and — when the entry has
+/// no PDF yet and an Unpaywall email is configured — try to fetch one too.
+///
+/// Returns `true` if a PDF was downloaded. As in `add_reference`, the PDF step
+/// is best-effort: its failures never undo the metadata that was just written.
+pub fn refetch_metadata(
+    all_bib_path: &str,
+    pdfs_dir: &str,
+    key: &str,
+    unpaywall_email: Option<&str>,
+) -> Result<bool> {
     let content = fs::read_to_string(all_bib_path)?;
     let mut bib = Bibliography::parse(&content)?;
 
@@ -777,7 +816,21 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
     }
 
     fs::write(all_bib_path, bib.to_biblatex_string())?;
-    Ok(())
+
+    // Look for an open-access PDF, but only if this entry hasn't got one.
+    if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
+        if let Ok(dest) = pdf_dest_for_entry(all_bib_path, pdfs_dir, key) {
+            if !dest.exists() && fetch_oa_pdf(&doi, email, &dest).unwrap_or(false) {
+                if let Some(entry) = bib.get_mut(key) {
+                    entry.set("file", field(dest.to_string_lossy()));
+                    fs::write(all_bib_path, bib.to_biblatex_string())?;
+                }
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 pub fn extract_doi_from_pdf(pdf_path: &str) -> Option<String> {
@@ -987,6 +1040,7 @@ pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
 
 pub fn add_reference_by_metadata(
     all_bib: &str,
+    pdfs_dir: &str,
     title: &str,
     author: &str,
     unpaywall_email: Option<&str>,
@@ -1006,7 +1060,7 @@ pub fn add_reference_by_metadata(
     }
 
     let doi = lookup_doi_by_metadata(title, author)?;
-    add_reference(all_bib, &doi, unpaywall_email)
+    add_reference(all_bib, pdfs_dir, &doi, unpaywall_email)
 }
 
 #[cfg(test)]

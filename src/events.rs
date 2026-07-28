@@ -124,6 +124,7 @@ pub fn handle_key(
         KeyCode::Enter if matches!(app.mode, Mode::Adding) => {
             if !app.new_ref.is_empty() {
                 let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+                let pdfs_dir      = app.config.pdfs_dir.to_string_lossy().to_string();
                 let unpaywall_email = app.config.unpaywall_email.clone();
                 let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
                 let doi           = app.new_ref.trim().to_string();
@@ -136,7 +137,7 @@ pub fn handle_key(
                 } else {
                     app.suspend_tui().ok();
                     println!("Fetching {}...", app.new_ref);
-                    let r = add_reference(&all_bib_path, &doi, unpaywall_email.as_deref());
+                    let r = add_reference(&all_bib_path, &pdfs_dir, &doi, unpaywall_email.as_deref());
                     app.resume_tui().ok();
                     terminal.clear().ok();
                     r
@@ -346,22 +347,37 @@ pub fn handle_key(
                 app.references.clone()
             };
             if let Some(entry) = active_refs.get(app.selected_reference) {
-                let key          = entry.key.clone();
-                let all_bib_path = app.config.all_bib.to_string_lossy().to_string();
+                let key             = entry.key.clone();
+                let all_bib_path    = app.config.all_bib.to_string_lossy().to_string();
+                let pdfs_dir        = app.config.pdfs_dir.to_string_lossy().to_string();
+                let unpaywall_email = app.config.unpaywall_email.clone();
                 app.log(&format!("Refetching metadata for '{}'", key));
                 app.suspend_tui().ok();
                 println!("Fetching metadata for '{}'...", key);
-                let result = refetch_metadata(&all_bib_path, &key);
+                if unpaywall_email.is_some() {
+                    println!("Will also look for an open-access PDF if one is missing...");
+                }
+                let result = refetch_metadata(
+                    &all_bib_path,
+                    &pdfs_dir,
+                    &key,
+                    unpaywall_email.as_deref(),
+                );
                 app.resume_tui().ok();
                 terminal.clear().ok();
                 match result {
-                    Ok(_) => {
+                    Ok(got_pdf) => {
                         app.load_references();
                         if let Some(idx) = app.references.iter().position(|e| e.key == key) {
                             app.selected_reference = idx;
                         }
-                        app.log(&format!("  Metadata updated for '{}'", key));
-                        app.show_alert(&format!("Metadata updated for '{}'", key));
+                        if got_pdf {
+                            app.log(&format!("  Metadata updated and PDF downloaded for '{}'", key));
+                            app.show_alert(&format!("Metadata + PDF updated for '{}'", key));
+                        } else {
+                            app.log(&format!("  Metadata updated for '{}'", key));
+                            app.show_alert(&format!("Metadata updated for '{}'", key));
+                        }
                     }
                     Err(e) => {
                         app.log(&format!("  Fetch failed for '{}': {}", key, e));
@@ -631,7 +647,7 @@ pub fn handle_key(
                         Ok(key)
                     } else {
                         println!("Fetching metadata for DOI: {doi}...");
-                        add_reference(&all_bib_path, &doi, unpaywall_email.as_deref())
+                        add_reference(&all_bib_path, &pdfs_dir, &doi, unpaywall_email.as_deref())
                     };
                     app.resume_tui().ok();
                     terminal.clear().ok();
@@ -894,7 +910,7 @@ fn handle_file_browser_enter(
                                 Ok(key)
                             } else {
                                 println!("  DOI found: {doi}, fetching metadata...");
-                                let r = add_reference(&all_bib_path, &doi, unpaywall_email.as_deref());
+                                let r = add_reference(&all_bib_path, &pdfs_dir, &doi, unpaywall_email.as_deref());
                                 r
                             };
 
@@ -1024,7 +1040,7 @@ fn handle_file_browser_enter(
                             Ok(key)
                         } else {
                             println!("  DOI found: {doi}, fetching metadata...");
-                            let r = add_reference(&all_bib_path, &doi, unpaywall_email.as_deref());
+                            let r = add_reference(&all_bib_path, &pdfs_dir, &doi, unpaywall_email.as_deref());
                             r
                         };
 
@@ -1102,6 +1118,7 @@ fn do_doi_list_import(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) {
     let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+    let pdfs_dir      = app.config.pdfs_dir.to_string_lossy().to_string();
     let unpaywall_email = app.config.unpaywall_email.clone();
     let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
     let paths = std::mem::take(&mut app.pending_import_paths);
@@ -1141,7 +1158,7 @@ fn do_doi_list_import(
                 existing += 1;
                 Ok(key)
             } else {
-                match add_reference(&all_bib_path, doi, unpaywall_email.as_deref()) {
+                match add_reference(&all_bib_path, &pdfs_dir, doi, unpaywall_email.as_deref()) {
                     Ok(key) => {
                         println!("  ✓ added as '{key}'");
                         app.log(&format!("  {} added as '{}'", doi, key));
