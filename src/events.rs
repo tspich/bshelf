@@ -13,6 +13,7 @@ use bshelf::{
     find_existing_by_doi,
     import_bib_file,
     link_pdf_to_entry,
+    normalize_doi,
     parse_doi_list,
     pdf_dest_for_entry,
     refetch_metadata,
@@ -282,9 +283,7 @@ pub fn handle_key(
                 app.references.clone()
             };
             if let Some(r) = active_refs.get(app.selected_reference) {
-                let safe_name = r.doi().ok()
-                    .as_deref()
-                    .unwrap_or("")
+                let safe_name = normalize_doi(r.doi().ok().as_deref().unwrap_or(""))
                     .replace('/', "-");
                 let pdf_path = app.config.pdfs_dir.join(format!("{safe_name}.pdf"));
                 if pdf_path.exists() {

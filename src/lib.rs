@@ -53,6 +53,31 @@ pub fn clean_jats(s: &str) -> String {
     ws_re.replace_all(&decoded, " ").trim().to_string()
 }
 
+/// Reduce a DOI to its bare form: `https://doi.org/10.1/x`, `doi:10.1/x` and
+/// `10.1/x` all become `10.1/x`.
+///
+/// Entries arriving from external `.bib` files routinely store the URL form,
+/// which breaks anything that derives a filename or compares DOIs, so every
+/// read and write of a `doi` field goes through here.
+pub fn normalize_doi(doi: &str) -> String {
+    let s = doi.trim();
+    let lower = s.to_lowercase();
+    for prefix in [
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "doi.org/",
+        "doi:",
+    ] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            // Slice the original so the DOI keeps its case.
+            return s[s.len() - rest.len()..].trim().to_string();
+        }
+    }
+    s.to_string()
+}
+
 pub type ProjectsMap = HashMap<String, Vec<String>>;
 
 pub fn chunks_to_string(chunks: &[Spanned<Chunk>]) -> String {
@@ -367,7 +392,9 @@ pub fn add_reference(
     //     return Ok(existing.key.clone());
     // }
 
-    // 3. Fetch Crossref
+    // 3. Fetch Crossref. Store the bare DOI even if a URL was pasted in.
+    let doi = normalize_doi(doi);
+    let doi = doi.as_str();
     let work = fetch_crossref_work(doi)?;
 
     let title     = work.title_string();
@@ -545,18 +572,9 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
         Bibliography::parse(&all_content)?
     };
 
-    let normalize_doi = |s: &str| -> String {
-        let lower = s.trim().to_lowercase();
-        lower
-            .strip_prefix("https://doi.org/")
-            .or_else(|| lower.strip_prefix("http://doi.org/"))
-            .unwrap_or(&lower)
-            .to_string()
-    };
-
     let entry_doi = |e: &Entry| -> Option<String> {
         e.get("doi")
-            .map(|c| normalize_doi(&chunks_to_string(c)))
+            .map(|c| normalize_doi(&chunks_to_string(c)).to_lowercase())
             .filter(|s| !s.is_empty())
     };
 
@@ -607,6 +625,13 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
 
             let mut new_entry = entry.clone();
             new_entry.key = new_key.clone();
+            // External .bib files often carry the URL form; store the bare DOI.
+            if let Some(raw) = new_entry.get("doi").map(|c| chunks_to_string(c)) {
+                let bare = normalize_doi(&raw);
+                if bare != raw {
+                    new_entry.set("doi", field(&bare));
+                }
+            }
             all_bib.insert(new_entry);
             new_key
         };
@@ -656,6 +681,36 @@ pub fn parse_doi_list(path: &str) -> Result<DoiList> {
     }
 
     Ok(list)
+}
+
+/// Rewrite any `doi` field stored in URL form back to the bare DOI, for the
+/// whole library at once. Returns the keys that were changed. Entries that
+/// already hold a bare DOI are untouched, and the file is only written when
+/// something actually changed.
+pub fn normalize_stored_dois(all_bib_path: &str) -> Result<Vec<String>> {
+    let content = fs::read_to_string(all_bib_path)?;
+    let mut bib = Bibliography::parse(&content)?;
+
+    let fixes: Vec<(String, String)> = bib
+        .iter()
+        .filter_map(|e| {
+            let raw = chunks_to_string(e.get("doi")?);
+            let bare = normalize_doi(&raw);
+            (bare != raw).then(|| (e.key.clone(), bare))
+        })
+        .collect();
+
+    for (key, bare) in &fixes {
+        if let Some(entry) = bib.get_mut(key) {
+            entry.set("doi", field(bare));
+        }
+    }
+
+    if !fixes.is_empty() {
+        fs::write(all_bib_path, bib.to_biblatex_string())?;
+    }
+
+    Ok(fixes.into_iter().map(|(k, _)| k).collect())
 }
 
 pub fn rename_project(proj_map_path: &str, old_name: &str, new_name: &str) -> Result<()> {
@@ -734,12 +789,7 @@ pub fn refetch_metadata(
         .filter(|s| !s.trim().is_empty());
 
     let (doi, doi_was_missing) = if let Some(stored) = stored_doi {
-        let cleaned = stored
-            .strip_prefix("https://doi.org/")
-            .or_else(|| stored.strip_prefix("http://doi.org/"))
-            .unwrap_or(&stored)
-            .to_string();
-        (cleaned, false)
+        (normalize_doi(&stored), false)
     } else {
         let title = entry.get("title")
             .map(|c| chunks_to_string(c))
@@ -765,7 +815,9 @@ pub fn refetch_metadata(
             .unwrap_or(true)
     };
 
-    if doi_was_missing {
+    // Write the DOI back when it was missing, and also when it was stored in
+    // URL form — `doi` is already normalized at this point.
+    if doi_was_missing || chunks_to_string(entry.get("doi").unwrap_or(&vec![])) != doi {
         entry.set("doi", field(&doi));
     }
 
@@ -868,11 +920,7 @@ pub fn pdf_dest_for_entry(all_bib_path: &str, pdfs_dir: &str, key: &str) -> Resu
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("No DOI found for '{}'", key))?;
 
-    let filename = doi
-        .strip_prefix("https://doi.org/")
-        .or_else(|| doi.strip_prefix("http://doi.org/"))
-        .unwrap_or(&doi)
-        .replace('/', "-");
+    let filename = normalize_doi(&doi).replace('/', "-");
 
     Ok(PathBuf::from(pdfs_dir).join(format!("{filename}.pdf")))
 }
@@ -1015,23 +1063,12 @@ pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
     let content = std::fs::read_to_string(all_bib_path).ok()?;
     let bib = biblatex::Bibliography::parse(&content).ok()?;
 
-    // Normalise to bare DOI for comparison
-    // let bare = doi
-    //     .strip_prefix("https://doi.org/")
-    //     .or_else(|| doi.strip_prefix("http://doi.org/"))
-    //     .unwrap_or(doi)
-    //     .to_lowercase();
-
     bib.iter().find(|e| {
         e.get("doi")
             .map(|chunks| {
-                let stored = chunks_to_string(chunks).to_lowercase();
                 // Match whether stored as bare DOI or full URL
-                let stored_bare = stored
-                    .strip_prefix("https://doi.org/")
-                    .or_else(|| stored.strip_prefix("http://doi.org/"))
-                    .unwrap_or(&stored);
-                stored_bare == doi.to_lowercase()
+                normalize_doi(&chunks_to_string(chunks)).to_lowercase()
+                    == normalize_doi(doi).to_lowercase()
             })
             .unwrap_or(false)
     })
@@ -1289,6 +1326,67 @@ mod tests {
             chunks_to_string(original.get("doi").unwrap()).to_lowercase(),
             "10.1000/a"
         );
+    }
+
+    // ── normalize_doi ────────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_doi_strips_every_common_prefix() {
+        for input in [
+            "10.1000/aB",
+            "https://doi.org/10.1000/aB",
+            "http://doi.org/10.1000/aB",
+            "https://dx.doi.org/10.1000/aB",
+            "HTTPS://DOI.ORG/10.1000/aB",
+            "doi:10.1000/aB",
+            "DOI:10.1000/aB",
+            "  https://doi.org/10.1000/aB  ",
+        ] {
+            assert_eq!(normalize_doi(input), "10.1000/aB", "input was {input}");
+        }
+    }
+
+    #[test]
+    fn normalize_doi_leaves_a_bare_doi_alone() {
+        // Including one with a slash-heavy suffix that must survive intact.
+        assert_eq!(normalize_doi("10.1002/(sici)1097-0134(1999)37:2<228::aid>3.0.co;2-5"),
+                   "10.1002/(sici)1097-0134(1999)37:2<228::aid>3.0.co;2-5");
+    }
+
+    #[test]
+    fn normalize_stored_dois_rewrites_only_url_forms() {
+        let dir = tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "all.bib",
+            "@article{a, title = {A}, author = {X}, doi = {https://doi.org/10.1000/a}}\n\
+             @article{b, title = {B}, author = {Y}, doi = {10.1000/b}}\n\
+             @article{c, title = {C}, author = {Z}}",
+        );
+        let fixed = normalize_stored_dois(&path).unwrap();
+        assert_eq!(fixed, vec!["a".to_string()]);
+
+        let bib = Bibliography::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(chunks_to_string(bib.get("a").unwrap().get("doi").unwrap()), "10.1000/a");
+        assert_eq!(chunks_to_string(bib.get("b").unwrap().get("doi").unwrap()), "10.1000/b");
+        assert!(bib.get("c").unwrap().get("doi").is_none());
+
+        // Idempotent: a second pass changes nothing.
+        assert!(normalize_stored_dois(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_stores_bare_doi_for_url_form_entries() {
+        let dir = tempdir().unwrap();
+        let all = write_file(dir.path(), "all.bib", "");
+        let imp = write_file(
+            dir.path(),
+            "in.bib",
+            "@article{smith_2020, title = {T}, author = {Smith}, doi = {https://doi.org/10.1000/a}}",
+        );
+        import_bib_file(&all, &imp).unwrap();
+        let bib = Bibliography::parse(&std::fs::read_to_string(&all).unwrap()).unwrap();
+        assert_eq!(chunks_to_string(bib.get("smith_2020").unwrap().get("doi").unwrap()), "10.1000/a");
     }
 
     // ── parse_doi_list ───────────────────────────────────────────────────────
