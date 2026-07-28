@@ -9,7 +9,6 @@ use serde_json::Value;
 use biblatex::{Bibliography, Chunks, DateValue};
 use biblatex::{Entry, EntryType, PermissiveType};
 use biblatex::{Chunk, Spanned};
-use crossref::Crossref;
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -175,7 +174,157 @@ pub fn project_entries<'a>(
     .collect()
 }
 
-pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
+/// A Crossref `/works` record, narrowed to the fields bshelf actually uses.
+///
+/// Deserialised straight from the API rather than through the `crossref`
+/// crate: that crate types several fields too strictly (e.g. an assertion's
+/// `explanation`, which the API returns as `{"URL": …}`, not a string) and a
+/// single mismatch anywhere in the record makes the whole fetch fail. Unknown
+/// fields are ignored here, so only the fields below can ever break.
+#[derive(Debug, Default, Deserialize)]
+pub struct CrossrefWork {
+    #[serde(default)]
+    pub title: Vec<String>,
+    #[serde(rename = "container-title", default)]
+    pub container_title: Vec<String>,
+    #[serde(default)]
+    pub author: Vec<CrossrefAuthor>,
+    #[serde(default)]
+    pub issued: CrossrefIssued,
+    #[serde(default)]
+    pub volume: Option<String>,
+    #[serde(default)]
+    pub issue: Option<String>,
+    #[serde(default)]
+    pub page: Option<String>,
+    #[serde(rename = "ISSN", default)]
+    pub issn: Vec<String>,
+    #[serde(default)]
+    pub publisher: Option<String>,
+    #[serde(rename = "URL", default)]
+    pub url: Option<String>,
+    #[serde(rename = "abstract", default)]
+    pub abstract_: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CrossrefAuthor {
+    #[serde(default)]
+    pub given: Option<String>,
+    #[serde(default)]
+    pub family: Option<String>,
+    /// Organisations are listed under `name` with no `given`/`family`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CrossrefIssued {
+    #[serde(rename = "date-parts", default)]
+    pub date_parts: Vec<Vec<Option<i64>>>,
+}
+
+impl CrossrefWork {
+    pub fn title_string(&self) -> String {
+        self.title
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<no title>".to_string())
+    }
+
+    pub fn journal(&self) -> Option<&str> {
+        self.container_title.first().map(|s| s.as_str())
+    }
+
+    pub fn year(&self) -> Option<String> {
+        self.issued
+            .date_parts
+            .first()
+            .and_then(|d| d.first())
+            .and_then(|y| y.map(|y| y.to_string()))
+    }
+
+    /// Author names as `Given Family`, falling back to an organisation `name`.
+    pub fn author_names(&self) -> Vec<String> {
+        self.author
+            .iter()
+            .map(|a| {
+                let given = a.given.as_deref().unwrap_or("").trim();
+                let family = a
+                    .family
+                    .as_deref()
+                    .or(a.name.as_deref())
+                    .unwrap_or("")
+                    .trim();
+                format!("{} {}", given, family).trim().to_string()
+            })
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    pub fn abstract_text(&self) -> Option<String> {
+        self.abstract_.as_deref().map(clean_jats)
+    }
+}
+
+/// Fetch a single work from Crossref.
+pub fn fetch_crossref_work(doi: &str) -> Result<CrossrefWork> {
+    let url = format!("https://api.crossref.org/works/{}", doi.trim());
+    let resp = blocking::get(&url)?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("Crossref returned HTTP {} for {}", status.as_u16(), doi);
+    }
+
+    let body: Value = resp.json()?;
+    let message = body
+        .get("message")
+        .ok_or_else(|| anyhow::anyhow!("Crossref response for {} had no 'message'", doi))?;
+
+    Ok(serde_json::from_value(message.clone())?)
+}
+
+/// Ask Unpaywall for an open-access PDF and store it under `pdfs/`.
+/// `Ok(None)` means there simply is no OA copy to download.
+fn fetch_oa_pdf(doi: &str, email: &str) -> Result<Option<String>> {
+    let url = format!(
+        "https://api.unpaywall.org/v2/{}?email={}",
+        doi.trim(),
+        urlencoding::encode(email.trim())
+    );
+    let up: Value = blocking::get(&url)?.json()?;
+
+    let Some(pdf_url) = up["best_oa_location"]["url_for_pdf"].as_str() else {
+        return Ok(None);
+    };
+
+    let resp = blocking::get(pdf_url)?;
+    let is_pdf = resp
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        .map(|ct| ct.contains("pdf"))
+        .unwrap_or(false);
+
+    // Publishers routinely answer with a 403 HTML page instead of the PDF.
+    if !is_pdf {
+        return Ok(None);
+    }
+
+    fs::create_dir_all("pdfs")?;
+    let path = format!("pdfs/{}.pdf", doi.replace('/', "-"));
+    fs::write(&path, resp.bytes()?)?;
+    Ok(Some(path))
+}
+
+/// Fetch `doi` from Crossref and append it to `all_bib`, returning its key.
+///
+/// The entry is written to disk as soon as the metadata is in hand. The
+/// Unpaywall PDF lookup that follows is strictly best-effort: it is skipped
+/// when no email is configured, and any failure in it leaves the reference
+/// saved rather than discarding it.
+pub fn add_reference(all_bib: &str, doi: &str, unpaywall_email: Option<&str>) -> Result<String> {
     // 1. Load bibliography
     let content = fs::read_to_string(&all_bib)?;
     let mut bib = Bibliography::parse(&content)?;
@@ -185,69 +334,27 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     // // 2. Duplicate check
     // if let Some(existing) = bib.iter().find(|e| {
     //     e.get("doi")
-    //         .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url)) 
+    //         .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url))
     //         .unwrap_or(false)
     // }){
     //     return Ok(existing.key.clone());
     // }
 
     // 3. Fetch Crossref
-    let client = Crossref::builder()
-        .build()
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let work = fetch_crossref_work(doi)?;
 
-    let work = client
-        .work(doi)
-        .map_err(|e| anyhow::anyhow!("crossref work error: {e:?}"))?;
+    let title     = work.title_string();
+    let journal   = work.journal().unwrap_or_default().to_string();
+    let year      = work.year().unwrap_or_default();
+    let authors   = work.author_names();
+    let volume    = work.volume.clone().unwrap_or_default();
+    let issue     = work.issue.clone().unwrap_or_default();
+    let pages     = work.page.clone().unwrap_or_default();
+    let issn      = work.issn.join(", ");
+    let publisher = work.publisher.clone().unwrap_or_default();
+    let doi_url   = work.url.clone().unwrap_or_default();
 
-    let title = work
-        .title
-        .get(0)
-        .cloned()
-        .unwrap_or_else(|| "<no title>".to_string());
-
-    let journal = work
-        .container_title
-        .as_ref()
-        .and_then(|v| v.get(0))
-        .cloned()
-        .unwrap_or_default();
-
-    let year = work
-        .issued
-        .date_parts
-        .0
-        .get(0)
-        .and_then(|d| d.get(0))
-        .and_then(|d| d.map(|y| y.to_string()))
-        .unwrap_or_default();
-
-    let authors: Vec<String> = work
-        .author
-        .as_ref()
-        .map(|v| {
-            v.iter()
-                .map(|c| {
-                    let given = c.given.as_deref().unwrap_or("").trim();
-                    let family = c.family.clone();
-                    format!("{} {}", given, family).trim().to_string()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let volume = work.volume.clone().unwrap_or_default();
-    let issue = work.issue.clone().unwrap_or_default();
-    let pages = work.page.clone().unwrap_or_default(); // note `page` field in Work
-    let issn = work.issn.as_ref().map(|v| v.join(", ")).unwrap_or_default();
-    let publisher = work.publisher.clone();
-    let doi_url = work.url.clone();
-
-    let abstract_text = work
-        .abstract_
-        .as_ref()
-        .map(|s| clean_jats(s))
-        .unwrap_or_default();
+    let abstract_text = work.abstract_text().unwrap_or_default();
 
     // 4. Citation key
     // let key = format!(
@@ -302,34 +409,21 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     entry.set("abstract",  field(&abstract_text));
 
 
-    // 6. Unpaywall PDF
-    let unpaywall_url = format!(
-        "https://api.unpaywall.org/v2/{doi}?email=your@email.com"
-    );
-    let up: Value = blocking::get(&unpaywall_url)?.json()?;
-
-    if let Some(url) = up["best_oa_location"]["url_for_pdf"].as_str() {
-        fs::create_dir_all("pdfs")?;
-        let filename = doi.replace("/", "-") + ".pdf";
-        let path = format!("pdfs/{filename}");
-
-        let resp = blocking::get(url)?;
-        if resp
-            .headers()
-            .get("content-type")
-            .and_then(|h| h.to_str().ok())
-            .map(|ct| ct.contains("pdf"))
-            .unwrap_or(false)
-        {
-            fs::write(&path, resp.bytes()?)?;
-            entry.set("file", field(path));
-        }
-    }
-
-    // 7. Add + save
+    // 6. Add + save. Do this *before* the PDF lookup so that a hiccup in the
+    //    optional Unpaywall step can never cost us the metadata.
     bib.insert(entry);
     // fs::write(&all_bib, bib.to_bibtex_string())?;
     fs::write(&all_bib, bib.to_biblatex_string())?;
+
+    // 7. Unpaywall PDF — best-effort, failures are deliberately swallowed.
+    if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
+        if let Ok(Some(path)) = fetch_oa_pdf(doi, email) {
+            if let Some(entry) = bib.get_mut(&key) {
+                entry.set("file", field(&path));
+                fs::write(&all_bib, bib.to_biblatex_string())?;
+            }
+        }
+    }
 
     Ok(key)
 }
@@ -621,13 +715,7 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
         (lookup_doi_by_metadata(&title, &author)?, true)
     };
 
-    let client = Crossref::builder()
-        .build()
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-
-    let work = client
-        .work(&doi)
-        .map_err(|e| anyhow::anyhow!("Crossref error: {e:?}"))?;
+    let work = fetch_crossref_work(&doi)?;
 
     // Refetch only missing or empty fields
     let entry = bib.get_mut(key).unwrap();
@@ -649,7 +737,7 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
     }
 
     if is_empty(entry, "journal") {
-        if let Some(journal) = work.container_title.as_ref().and_then(|v| v.get(0)) {
+        if let Some(journal) = work.journal() {
             entry.set("journal", field(journal));
         }
     }
@@ -672,18 +760,20 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
         }
     }
 
-    if is_empty(entry, "issn") {
-        if let Some(issn) = &work.issn {
-            entry.set("issn", field(issn.join(", ")));
+    if is_empty(entry, "issn") && !work.issn.is_empty() {
+        entry.set("issn", field(work.issn.join(", ")));
+    }
+
+    if is_empty(entry, "publisher") {
+        if let Some(publisher) = work.publisher.as_deref().filter(|p| !p.is_empty()) {
+            entry.set("publisher", field(publisher));
         }
     }
 
-    if is_empty(entry, "publisher") && !work.publisher.is_empty() {
-        entry.set("publisher", field(&work.publisher));
-    }
-
-    if is_empty(entry, "url") && !work.url.is_empty() {
-        entry.set("url", field(&work.url));
+    if is_empty(entry, "url") {
+        if let Some(url) = work.url.as_deref().filter(|u| !u.is_empty()) {
+            entry.set("url", field(url));
+        }
     }
 
     fs::write(all_bib_path, bib.to_biblatex_string())?;
@@ -749,6 +839,11 @@ pub struct Config {
     pub projects_file: PathBuf,
     pub pdfs_dir: PathBuf,
     pub all_bib: PathBuf,
+    /// Address sent to Unpaywall when looking for open-access PDFs. Their API
+    /// requires a real one and throttles junk addresses; when this is unset the
+    /// PDF lookup is skipped entirely rather than sent with a placeholder.
+    #[serde(default)]
+    pub unpaywall_email: Option<String>,
 }
 
 // pub fn load_config() -> Config {
@@ -780,10 +875,17 @@ pub fn load_config() -> Config {
         let pdfs_dir  = prompt("Path to your PDFs directory",     "~/.local/share/bshelf/pdfs");
         let proj_file = prompt("Path to your projects.json file", "~/.local/share/bshelf/projects.json");
 
-        let contents = format!(
+        println!("\nUnpaywall looks for free PDFs of the papers you add.");
+        println!("It requires a real email address; leave blank to skip PDF lookups.");
+        let email = prompt("Your email for Unpaywall", "");
+
+        let mut contents = format!(
             "all_bib = \"{}\"\npdfs_dir = \"{}\"\nprojects_file = \"{}\"\n",
             all_bib, pdfs_dir, proj_file
         );
+        if !email.trim().is_empty() {
+            contents.push_str(&format!("unpaywall_email = \"{}\"\n", email.trim()));
+        }
 
         fs::create_dir_all(&config_dir)
             .expect("Could not create config directory");
@@ -828,7 +930,11 @@ pub fn load_config() -> Config {
 
 fn prompt(label: &str, default: &str) -> String {
     use std::io::Write;
-    print!("{} [{}]: ", label, default);
+    if default.is_empty() {
+        print!("{}: ", label);
+    } else {
+        print!("{} [{}]: ", label, default);
+    }
     std::io::stdout().flush().unwrap();
 
     let mut input = String::new();
@@ -879,7 +985,12 @@ pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
     .map(|e| e.key.clone())
 }
 
-pub fn add_reference_by_metadata(all_bib: &str, title: &str, author: &str) -> Result<String> {
+pub fn add_reference_by_metadata(
+    all_bib: &str,
+    title: &str,
+    author: &str,
+    unpaywall_email: Option<&str>,
+) -> Result<String> {
     let content = fs::read_to_string(all_bib)?;
     let bib = Bibliography::parse(&content)?;
 
@@ -895,7 +1006,7 @@ pub fn add_reference_by_metadata(all_bib: &str, title: &str, author: &str) -> Re
     }
 
     let doi = lookup_doi_by_metadata(title, author)?;
-    add_reference(all_bib, &doi)
+    add_reference(all_bib, &doi, unpaywall_email)
 }
 
 #[cfg(test)]

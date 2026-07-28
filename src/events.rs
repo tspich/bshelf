@@ -124,6 +124,7 @@ pub fn handle_key(
         KeyCode::Enter if matches!(app.mode, Mode::Adding) => {
             if !app.new_ref.is_empty() {
                 let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+                let unpaywall_email = app.config.unpaywall_email.clone();
                 let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
                 let doi           = app.new_ref.trim().to_string();
 
@@ -135,7 +136,7 @@ pub fn handle_key(
                 } else {
                     app.suspend_tui().ok();
                     println!("Fetching {}...", app.new_ref);
-                    let r = add_reference(&all_bib_path, &doi);
+                    let r = add_reference(&all_bib_path, &doi, unpaywall_email.as_deref());
                     app.resume_tui().ok();
                     terminal.clear().ok();
                     r
@@ -618,6 +619,7 @@ pub fn handle_key(
             if !doi.is_empty() {
                 if let Some(pdf_path) = app.pending_pdf_path.take() {
                     let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+                    let unpaywall_email = app.config.unpaywall_email.clone();
                     let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
                     let pdf_str       = pdf_path.to_string_lossy().to_string();
                     let pdfs_dir      = app.config.pdfs_dir.to_string_lossy().to_string();
@@ -629,7 +631,7 @@ pub fn handle_key(
                         Ok(key)
                     } else {
                         println!("Fetching metadata for DOI: {doi}...");
-                        add_reference(&all_bib_path, &doi)
+                        add_reference(&all_bib_path, &doi, unpaywall_email.as_deref())
                     };
                     app.resume_tui().ok();
                     terminal.clear().ok();
@@ -870,6 +872,7 @@ fn handle_file_browser_enter(
                 "pdf" => {
                     let pdf_str       = path.to_string_lossy().to_string();
                     let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+                    let unpaywall_email = app.config.unpaywall_email.clone();
                     let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
                     let pdfs_dir      = app.config.pdfs_dir.to_string_lossy().to_string();
 
@@ -889,7 +892,7 @@ fn handle_file_browser_enter(
                                 Ok(key)
                             } else {
                                 println!("  DOI found: {doi}, fetching metadata...");
-                                let r = add_reference(&all_bib_path, &doi);
+                                let r = add_reference(&all_bib_path, &doi, unpaywall_email.as_deref());
                                 r
                             };
 
@@ -973,6 +976,7 @@ fn handle_file_browser_enter(
                 app.file_browser = None;
                 let pdf_str       = path.to_string_lossy().to_string();
                 let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+                let unpaywall_email = app.config.unpaywall_email.clone();
                 let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
                 let pdfs_dir      = app.config.pdfs_dir.to_string_lossy().to_string();
 
@@ -1018,7 +1022,7 @@ fn handle_file_browser_enter(
                             Ok(key)
                         } else {
                             println!("  DOI found: {doi}, fetching metadata...");
-                            let r = add_reference(&all_bib_path, &doi);
+                            let r = add_reference(&all_bib_path, &doi, unpaywall_email.as_deref());
                             r
                         };
 
@@ -1096,6 +1100,7 @@ fn do_doi_list_import(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) {
     let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+    let unpaywall_email = app.config.unpaywall_email.clone();
     let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
     let paths = std::mem::take(&mut app.pending_import_paths);
 
@@ -1134,7 +1139,7 @@ fn do_doi_list_import(
                 existing += 1;
                 Ok(key)
             } else {
-                match add_reference(&all_bib_path, doi) {
+                match add_reference(&all_bib_path, doi, unpaywall_email.as_deref()) {
                     Ok(key) => {
                         println!("  ✓ added as '{key}'");
                         app.log(&format!("  {} added as '{}'", doi, key));
