@@ -13,7 +13,7 @@ use bshelf::{
     publisher_string,
 };
 
-use crate::app::{App, Mode, mode_name};
+use crate::app::{App, ImportKind, Mode, mode_name};
 use crate::keybindings::{help_lines, mode_color};
 
 /// Draw the entire TUI for one frame.
@@ -633,9 +633,13 @@ fn draw_import_project_popup(f: &mut Frame, app: &App) {
     };
 
     let n = app.pending_import_paths.len();
+    let what = match app.pending_import_kind {
+        ImportKind::Bib     => "file",
+        ImportKind::DoiList => "DOI list",
+    };
     let title = format!(
-        " Import {} file{} to… (↑↓ navigate, Enter confirm, Esc cancel) ",
-        n, if n == 1 { "" } else { "s" }
+        " Import {} {}{} to… (↑↓ navigate, Enter confirm, Esc cancel) ",
+        n, what, if n == 1 { "" } else { "s" }
     );
 
     let block = Block::default()

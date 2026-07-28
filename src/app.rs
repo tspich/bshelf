@@ -64,9 +64,34 @@ pub fn mode_name(mode: &Mode) -> &'static str {
 // FileBrowser
 // ----------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq)]
 pub enum FileBrowserMode {
     Bib,
     Pdf,
+    DoiList,
+}
+
+impl FileBrowserMode {
+    /// Which files this browser offers, besides directories.
+    pub fn accepts(&self, path: &std::path::Path) -> bool {
+        let ext = path.extension().and_then(|e| e.to_str());
+        match self {
+            FileBrowserMode::Bib => ext == Some("bib"),
+            FileBrowserMode::Pdf => ext == Some("pdf"),
+            // DOI lists are plain text and often carry no extension at all.
+            FileBrowserMode::DoiList => {
+                matches!(ext, None | Some("txt") | Some("text") | Some("doi") | Some("dois"))
+            }
+        }
+    }
+}
+
+/// What `pending_import_paths` holds, so the project picker knows which
+/// importer to run once a target project has been chosen.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ImportKind {
+    Bib,
+    DoiList,
 }
 
 pub struct FileBrowser {
@@ -100,15 +125,7 @@ impl FileBrowser {
                 let mut v: Vec<_> = rd
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
-                    .filter(|p| {
-                        p.is_dir() || p.extension()
-                            .and_then(|e| e.to_str())
-                            .map(|e| match self.browser_mode {
-                                FileBrowserMode::Bib => e == "bib",
-                                FileBrowserMode::Pdf => e == "pdf",
-                            })
-                            .unwrap_or(false)
-                    })
+                    .filter(|p| p.is_dir() || self.browser_mode.accepts(p))
                     .collect();
                 v.sort_by(|a, b| {
                     let da = a.is_dir();
@@ -213,6 +230,7 @@ pub struct App {
     pub clipboard: Option<arboard::Clipboard>,
     pub help_scroll: usize,
     pub pending_import_paths: Vec<std::path::PathBuf>,
+    pub pending_import_kind: ImportKind,
     pub import_project_target: usize,  // index into the picker list
     pub import_new_project_name: String,
     pub search_all_refs: Vec<Entry>,
@@ -262,6 +280,7 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             help_scroll: 0,
             pending_import_paths: Vec::new(),
+            pending_import_kind: ImportKind::Bib,
             import_project_target: 0,
             import_new_project_name: String::new(),
             search_all_refs: Vec::new(),

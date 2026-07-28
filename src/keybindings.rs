@@ -46,6 +46,7 @@ pub fn help_lines() -> &'static [&'static str] {
         "  A             Add reference by DOI",
         "  B             Export project to .bib",
         "  I             Import .bib file",
+        "  i             Import DOIs from a text file (one DOI per line)",
         "  M             Copy reference to project",
         "  N             Create new project",
         "  R             Rename current project",

@@ -13,13 +13,14 @@ use bshelf::{
     find_existing_by_doi,
     import_bib_file,
     link_pdf_to_entry,
+    parse_doi_list,
     pdf_dest_for_entry,
     refetch_metadata,
     remove_from_project,
     rename_project
 };
 
-use crate::app::{App, FileBrowser, FileBrowserMode, Mode};
+use crate::app::{App, FileBrowser, FileBrowserMode, ImportKind, Mode};
 
 // TODO: Should be impossible to create a 'all' project
 
@@ -377,6 +378,14 @@ pub fn handle_key(
             let start = std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             app.file_browser = Some(FileBrowser::new(start, FileBrowserMode::Bib));
+            app.mode = Mode::FileBrowser;
+        }
+
+        // ── Import DOIs from a text file (one per line) ───────────────────────
+        KeyCode::Char('i') if matches!(app.mode, Mode::Normal) => {
+            let start = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            app.file_browser = Some(FileBrowser::new(start, FileBrowserMode::DoiList));
             app.mode = Mode::FileBrowser;
         }
 
@@ -751,7 +760,7 @@ pub fn handle_key(
                 } else {
                     non_all.get(target).cloned()
                 };
-                do_bib_import(app, project);
+                do_import(app, project, terminal);
             }
         }
         
@@ -777,7 +786,7 @@ pub fn handle_key(
                 app.projects.push(name.clone());
                 app.projects.sort();
                 app.selected_project = app.projects.iter().position(|p| *p == name).unwrap_or(0);
-                do_bib_import(app, Some(name));
+                do_import(app, Some(name), terminal);
             }
         }
 
@@ -813,10 +822,17 @@ fn handle_file_browser_enter(
         None => return,
     };
 
+    let browser_mode = fb.browser_mode;
     let multi: Vec<std::path::PathBuf> = fb.multi_selected.iter().cloned().collect();
 
     if !multi.is_empty() {
         app.file_browser = None;
+
+        // DOI lists are queued and fetched after the target project is picked.
+        if browser_mode == FileBrowserMode::DoiList {
+            queue_doi_lists(app, multi);
+            return;
+        }
 
         // Link-only path (`p`): use the first PDF, ignore the rest.
         if let Some(key) = app.pending_link_key.take() {
@@ -913,6 +929,7 @@ fn handle_file_browser_enter(
         // If any bib files were queued, go to project picker.
         // PDF processing already happened above (suspend/resume inline).
         if !app.pending_import_paths.is_empty() {
+            app.pending_import_kind = ImportKind::Bib;
             app.import_project_target = 0;
             app.mode = Mode::ImportProject;
         } else {
@@ -935,12 +952,20 @@ fn handle_file_browser_enter(
     };
 
     if let Some(path) = selected_file {
+        // DOI lists have no reliable extension, so they go by browser mode.
+        if browser_mode == FileBrowserMode::DoiList {
+            app.file_browser = None;
+            queue_doi_lists(app, vec![path]);
+            return;
+        }
+
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         match ext {
             "bib" => {
                 app.file_browser = None;
 
                 app.pending_import_paths = vec![path];
+                app.pending_import_kind = ImportKind::Bib;
                 app.import_project_target = 0;
                 app.mode = Mode::ImportProject;
             }
@@ -1041,6 +1066,117 @@ fn handle_file_browser_enter(
             _ => {}
         }
     }
+}
+
+/// Queue DOI-list files and hand over to the project picker.
+fn queue_doi_lists(app: &mut App, mut paths: Vec<std::path::PathBuf>) {
+    paths.sort();
+    app.pending_import_paths = paths;
+    app.pending_import_kind = ImportKind::DoiList;
+    app.import_project_target = 0;
+    app.mode = Mode::ImportProject;
+}
+
+fn do_import(
+    app: &mut App,
+    project: Option<String>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    match app.pending_import_kind {
+        ImportKind::Bib     => do_bib_import(app, project),
+        ImportKind::DoiList => do_doi_list_import(app, project, terminal),
+    }
+}
+
+/// Fetch every DOI listed in the queued text files. Crossref is slow enough
+/// that this runs with the TUI suspended so progress is visible.
+fn do_doi_list_import(
+    app: &mut App,
+    project: Option<String>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    let all_bib_path  = app.config.all_bib.to_string_lossy().to_string();
+    let proj_map_path = app.config.projects_file.to_string_lossy().to_string();
+    let paths = std::mem::take(&mut app.pending_import_paths);
+
+    let (mut added, mut existing, mut failed) = (0usize, 0usize, 0usize);
+
+    app.suspend_tui().ok();
+
+    for path in &paths {
+        app.log(&format!("Importing DOI list: {}", path.display()));
+        println!("Reading {}...", path.display());
+
+        let list = match parse_doi_list(path.to_str().unwrap_or("")) {
+            Ok(list) => list,
+            Err(e) => {
+                app.log(&format!("  Read failed: {}", e));
+                println!("  ✗ Read failed: {e}");
+                failed += 1;
+                continue;
+            }
+        };
+
+        for line in &list.skipped {
+            app.log(&format!("  No DOI in line: {}", line));
+            println!("  ⚠ No DOI in line: {line}");
+        }
+
+        let total = list.dois.len();
+        app.log(&format!("  {} DOIs found", total));
+
+        for (i, doi) in list.dois.iter().enumerate() {
+            println!("[{}/{}] {}", i + 1, total, doi);
+
+            let result = if let Some(key) = find_existing_by_doi(&all_bib_path, doi) {
+                println!("  already in your shelf as '{key}'");
+                app.log(&format!("  {} already in your shelf as '{}'", doi, key));
+                existing += 1;
+                Ok(key)
+            } else {
+                match add_reference(&all_bib_path, doi) {
+                    Ok(key) => {
+                        println!("  ✓ added as '{key}'");
+                        app.log(&format!("  {} added as '{}'", doi, key));
+                        added += 1;
+                        Ok(key)
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+
+            match result {
+                Ok(key) => {
+                    if let Some(ref proj) = project {
+                        match add_to_project(&proj_map_path, proj, &key) {
+                            Ok(_)  => app.log(&format!("  Added '{}' to project '{}'", key, proj)),
+                            Err(e) => app.log(&format!("  Failed to add '{}' to project '{}': {}", key, proj, e)),
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("  ✗ failed: {e}");
+                    app.log(&format!("  {} failed: {}", doi, e));
+                    failed += 1;
+                }
+            }
+        }
+    }
+
+    app.resume_tui().ok();
+    terminal.clear().ok();
+
+    app.load_references();
+    let dest = project.as_deref().unwrap_or("all");
+    app.log(&format!(
+        "DOI import complete: {} added, {} already present, {} failed (into '{}')",
+        added, existing, failed, dest
+    ));
+    app.show_alert(&format!(
+        "DOI import: {} added, {} already present, {} failed",
+        added, existing, failed
+    ));
+    app.mode = Mode::Normal;
 }
 
 fn do_bib_import(app: &mut App, project: Option<String>) {

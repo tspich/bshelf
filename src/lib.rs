@@ -495,6 +495,46 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
     Ok(keys)
 }
 
+/// Result of reading a plain-text DOI list: the DOIs found, in file order and
+/// de-duplicated, plus the lines that held no recognisable DOI.
+#[derive(Debug, Default)]
+pub struct DoiList {
+    pub dois: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// Parse a file containing one DOI per line. Blank lines and lines starting
+/// with `#` or `%` are ignored. A DOI is matched anywhere in the line, so
+/// `10.1000/x`, `doi:10.1000/x` and `https://doi.org/10.1000/x` all work.
+pub fn parse_doi_list(path: &str) -> Result<DoiList> {
+    let content = fs::read_to_string(path)?;
+    let doi_re = Regex::new(r"10\.\d{4,}/\S+")?;
+
+    let mut list = DoiList::default();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('%') {
+            continue;
+        }
+        match doi_re.find(line) {
+            Some(m) => {
+                let doi = m
+                    .as_str()
+                    .trim_end_matches(['.', ',', ';', ')', ']', '>'])
+                    .to_string();
+                if seen.insert(doi.to_lowercase()) {
+                    list.dois.push(doi);
+                }
+            }
+            None => list.skipped.push(line.to_string()),
+        }
+    }
+
+    Ok(list)
+}
+
 pub fn rename_project(proj_map_path: &str, old_name: &str, new_name: &str) -> Result<()> {
     let mut map = load_projects_map(proj_map_path)?;
 
@@ -1084,6 +1124,54 @@ mod tests {
             chunks_to_string(original.get("doi").unwrap()).to_lowercase(),
             "10.1000/a"
         );
+    }
+
+    // ── parse_doi_list ───────────────────────────────────────────────────────
+
+    #[test]
+    fn doi_list_reads_one_doi_per_line() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "dois.txt", "10.1000/a\n10.1000/b\n");
+        let list = parse_doi_list(&path).unwrap();
+        assert_eq!(list.dois, vec!["10.1000/a".to_string(), "10.1000/b".to_string()]);
+        assert!(list.skipped.is_empty());
+    }
+
+    #[test]
+    fn doi_list_accepts_url_and_prefixed_forms() {
+        let dir = tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "dois.txt",
+            "https://doi.org/10.1000/a\ndoi: 10.1000/b\nDOI 10.1000/c.\n",
+        );
+        let list = parse_doi_list(&path).unwrap();
+        assert_eq!(
+            list.dois,
+            vec!["10.1000/a".to_string(), "10.1000/b".to_string(), "10.1000/c".to_string()]
+        );
+    }
+
+    #[test]
+    fn doi_list_skips_blanks_and_comments_and_dedupes() {
+        let dir = tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "dois.txt",
+            "# my reading list\n\n10.1000/a\n  10.1000/A  \n% latex comment\n10.1000/b\n",
+        );
+        let list = parse_doi_list(&path).unwrap();
+        assert_eq!(list.dois, vec!["10.1000/a".to_string(), "10.1000/b".to_string()]);
+        assert!(list.skipped.is_empty());
+    }
+
+    #[test]
+    fn doi_list_reports_lines_without_a_doi() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "dois.txt", "10.1000/a\nnot a doi at all\n");
+        let list = parse_doi_list(&path).unwrap();
+        assert_eq!(list.dois, vec!["10.1000/a".to_string()]);
+        assert_eq!(list.skipped, vec!["not a doi at all".to_string()]);
     }
 
     #[test]
