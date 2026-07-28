@@ -444,15 +444,8 @@ impl App {
 
     pub fn log(&self, msg: &str) {
         use std::io::Write;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| {
-                let secs = d.as_secs();
-                let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
-                format!("{:02}:{:02}:{:02}", h, m, s)
-            })
-            .unwrap_or_else(|_| "??:??:??".to_string());
-    
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
