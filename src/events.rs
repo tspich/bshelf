@@ -796,7 +796,9 @@ pub fn handle_key(
         KeyCode::Char('L') if matches!(app.mode, Mode::Normal) => {
             let log_path = app.log_path.to_string_lossy().to_string();
             app.suspend_tui().ok();
+            // `+G` opens at the end — the newest entries are what you want.
             let _ = std::process::Command::new("less")
+                .arg("+G")
                 .arg(&log_path)
                 .status();
 
