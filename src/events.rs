@@ -131,9 +131,9 @@ pub fn handle_key(
                 let doi           = app.new_ref.trim().to_string();
 
                 let existing_key = find_existing_by_doi(&all_bib_path, &doi);
+                let was_existing = existing_key.is_some();
 
                 let result = if let Some(key) = existing_key {
-                    app.show_alert(&format!("'{}' already in your shelf", key));
                     Ok(key)
                 } else {
                     app.suspend_tui().ok();
@@ -147,11 +147,23 @@ pub fn handle_key(
 
                 match result {
                     Ok(key) => {
-                        let current = &app.projects[app.selected_project];
+                        let current = app.projects[app.selected_project].clone();
                         if current != "all" {
-                            add_to_project(&proj_map_path, current, &key).ok();
+                            add_to_project(&proj_map_path, &current, &key).ok();
                         }
-                        app.show_alert(&format!("New ref '{}' added to '{}'", key, current));
+                        // A DOI already on the shelf is not an error: it still gets
+                        // filed into the current project. Say so, rather than
+                        // claiming it is new.
+                        match (was_existing, current == "all") {
+                            (true,  true)  => app.show_alert(&format!("'{}' is already in your shelf", key)),
+                            (true,  false) => app.show_alert(&format!("'{}' was already in your shelf, added to '{}'", key, current)),
+                            (false, _)     => app.show_alert(&format!("New ref '{}' added to '{}'", key, current)),
+                        }
+                        app.log(&format!(
+                            "{} '{}' ({})",
+                            if was_existing { "Already present:" } else { "Added:" },
+                            key, doi
+                        ));
                         app.load_references();
                         if let Some(idx) = app.references.iter().position(|e| e.key == key) {
                             app.selected_reference = idx;
