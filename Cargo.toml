@@ -14,12 +14,12 @@ anyhow = "1"
 ratatui = "0.27"
 crossterm = "0.29"
 biblatex = "0.11.0"
-crossref = "0.2.2"
 toml = "1.0"
 dirs = "6"
 regex = "1"
 arboard = "3"
 urlencoding = "2"
+chrono = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

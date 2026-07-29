@@ -9,7 +9,6 @@ use serde_json::Value;
 use biblatex::{Bibliography, Chunks, DateValue};
 use biblatex::{Entry, EntryType, PermissiveType};
 use biblatex::{Chunk, Spanned};
-use crossref::Crossref;
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -52,6 +51,31 @@ pub fn clean_jats(s: &str) -> String {
         .replace("&#39;",  "'")
         .replace("&nbsp;", " ");
     ws_re.replace_all(&decoded, " ").trim().to_string()
+}
+
+/// Reduce a DOI to its bare form: `https://doi.org/10.1/x`, `doi:10.1/x` and
+/// `10.1/x` all become `10.1/x`.
+///
+/// Entries arriving from external `.bib` files routinely store the URL form,
+/// which breaks anything that derives a filename or compares DOIs, so every
+/// read and write of a `doi` field goes through here.
+pub fn normalize_doi(doi: &str) -> String {
+    let s = doi.trim();
+    let lower = s.to_lowercase();
+    for prefix in [
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "doi.org/",
+        "doi:",
+    ] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            // Slice the original so the DOI keeps its case.
+            return s[s.len() - rest.len()..].trim().to_string();
+        }
+    }
+    s.to_string()
 }
 
 pub type ProjectsMap = HashMap<String, Vec<String>>;
@@ -175,7 +199,184 @@ pub fn project_entries<'a>(
     .collect()
 }
 
-pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
+/// A Crossref `/works` record, narrowed to the fields bshelf actually uses.
+///
+/// Deserialised straight from the API rather than through the `crossref`
+/// crate: that crate types several fields too strictly (e.g. an assertion's
+/// `explanation`, which the API returns as `{"URL": …}`, not a string) and a
+/// single mismatch anywhere in the record makes the whole fetch fail. Unknown
+/// fields are ignored here, so only the fields below can ever break.
+#[derive(Debug, Default, Deserialize)]
+pub struct CrossrefWork {
+    #[serde(default)]
+    pub title: Vec<String>,
+    #[serde(rename = "container-title", default)]
+    pub container_title: Vec<String>,
+    #[serde(default)]
+    pub author: Vec<CrossrefAuthor>,
+    #[serde(default)]
+    pub issued: CrossrefIssued,
+    #[serde(default)]
+    pub volume: Option<String>,
+    #[serde(default)]
+    pub issue: Option<String>,
+    #[serde(default)]
+    pub page: Option<String>,
+    #[serde(rename = "ISSN", default)]
+    pub issn: Vec<String>,
+    #[serde(default)]
+    pub publisher: Option<String>,
+    #[serde(rename = "URL", default)]
+    pub url: Option<String>,
+    #[serde(rename = "abstract", default)]
+    pub abstract_: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CrossrefAuthor {
+    #[serde(default)]
+    pub given: Option<String>,
+    #[serde(default)]
+    pub family: Option<String>,
+    /// Organisations are listed under `name` with no `given`/`family`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CrossrefIssued {
+    #[serde(rename = "date-parts", default)]
+    pub date_parts: Vec<Vec<Option<i64>>>,
+}
+
+impl CrossrefWork {
+    pub fn title_string(&self) -> String {
+        self.title
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<no title>".to_string())
+    }
+
+    pub fn journal(&self) -> Option<&str> {
+        self.container_title.first().map(|s| s.as_str())
+    }
+
+    pub fn year(&self) -> Option<String> {
+        self.issued
+            .date_parts
+            .first()
+            .and_then(|d| d.first())
+            .and_then(|y| y.map(|y| y.to_string()))
+    }
+
+    /// Author names as `Given Family`, falling back to an organisation `name`.
+    pub fn author_names(&self) -> Vec<String> {
+        self.author
+            .iter()
+            .map(|a| {
+                let given = a.given.as_deref().unwrap_or("").trim();
+                let family = a
+                    .family
+                    .as_deref()
+                    .or(a.name.as_deref())
+                    .unwrap_or("")
+                    .trim();
+                format!("{} {}", given, family).trim().to_string()
+            })
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    pub fn abstract_text(&self) -> Option<String> {
+        self.abstract_.as_deref().map(clean_jats)
+    }
+}
+
+/// Fetch a single work from Crossref.
+pub fn fetch_crossref_work(doi: &str) -> Result<CrossrefWork> {
+    let url = format!("https://api.crossref.org/works/{}", doi.trim());
+    let resp = blocking::get(&url)?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("Crossref returned HTTP {} for {}", status.as_u16(), doi);
+    }
+
+    let body: Value = resp.json()?;
+    let message = body
+        .get("message")
+        .ok_or_else(|| anyhow::anyhow!("Crossref response for {} had no 'message'", doi))?;
+
+    Ok(serde_json::from_value(message.clone())?)
+}
+
+/// Ask Unpaywall for an open-access PDF and write it to `dest`.
+/// `Ok(false)` means there simply is no OA copy to download.
+///
+/// `dest` comes from `pdf_dest_for_entry`, so a downloaded PDF lands exactly
+/// where the rest of bshelf looks for it.
+fn fetch_oa_pdf(doi: &str, email: &str, dest: &std::path::Path) -> Result<bool> {
+    let url = format!(
+        "https://api.unpaywall.org/v2/{}?email={}",
+        doi.trim(),
+        urlencoding::encode(email.trim())
+    );
+    let up: Value = blocking::get(&url)?.json()?;
+
+    // Unpaywall's "best" location is often the publisher's own site, which
+    // routinely answers a bare GET with a 403 HTML page. Repository mirrors
+    // listed alongside it usually serve the file, so try them all in turn.
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push = |v: &Value| {
+        if let Some(u) = v["url_for_pdf"].as_str() {
+            let u = u.to_string();
+            if !candidates.contains(&u) {
+                candidates.push(u);
+            }
+        }
+    };
+    push(&up["best_oa_location"]);
+    if let Some(locations) = up["oa_locations"].as_array() {
+        for loc in locations {
+            push(loc);
+        }
+    }
+
+    for pdf_url in candidates.iter().take(5) {
+        let Ok(resp) = blocking::get(pdf_url) else { continue };
+        let is_pdf = resp
+            .headers()
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            .map(|ct| ct.contains("pdf"))
+            .unwrap_or(false);
+        if !is_pdf {
+            continue;
+        }
+        let Ok(bytes) = resp.bytes() else { continue };
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(dest, bytes)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+/// Fetch `doi` from Crossref and append it to `all_bib`, returning its key.
+///
+/// The entry is written to disk as soon as the metadata is in hand. The
+/// Unpaywall PDF lookup that follows is strictly best-effort: it is skipped
+/// when no email is configured, and any failure in it leaves the reference
+/// saved rather than discarding it. A downloaded PDF goes to `pdfs_dir`, named
+/// the way `pdf_dest_for_entry` expects, so the TUI can open it straight away.
+pub fn add_reference(
+    all_bib: &str,
+    pdfs_dir: &str,
+    doi: &str,
+    unpaywall_email: Option<&str>,
+) -> Result<String> {
     // 1. Load bibliography
     let content = fs::read_to_string(&all_bib)?;
     let mut bib = Bibliography::parse(&content)?;
@@ -185,69 +386,29 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     // // 2. Duplicate check
     // if let Some(existing) = bib.iter().find(|e| {
     //     e.get("doi")
-    //         .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url)) 
+    //         .map(|chunks| chunks.iter().any(|c| c.v.get() == doi_url))
     //         .unwrap_or(false)
     // }){
     //     return Ok(existing.key.clone());
     // }
 
-    // 3. Fetch Crossref
-    let client = Crossref::builder()
-        .build()
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    // 3. Fetch Crossref. Store the bare DOI even if a URL was pasted in.
+    let doi = normalize_doi(doi);
+    let doi = doi.as_str();
+    let work = fetch_crossref_work(doi)?;
 
-    let work = client
-        .work(doi)
-        .map_err(|e| anyhow::anyhow!("crossref work error: {e:?}"))?;
+    let title     = work.title_string();
+    let journal   = work.journal().unwrap_or_default().to_string();
+    let year      = work.year().unwrap_or_default();
+    let authors   = work.author_names();
+    let volume    = work.volume.clone().unwrap_or_default();
+    let issue     = work.issue.clone().unwrap_or_default();
+    let pages     = work.page.clone().unwrap_or_default();
+    let issn      = work.issn.join(", ");
+    let publisher = work.publisher.clone().unwrap_or_default();
+    let doi_url   = work.url.clone().unwrap_or_default();
 
-    let title = work
-        .title
-        .get(0)
-        .cloned()
-        .unwrap_or_else(|| "<no title>".to_string());
-
-    let journal = work
-        .container_title
-        .as_ref()
-        .and_then(|v| v.get(0))
-        .cloned()
-        .unwrap_or_default();
-
-    let year = work
-        .issued
-        .date_parts
-        .0
-        .get(0)
-        .and_then(|d| d.get(0))
-        .and_then(|d| d.map(|y| y.to_string()))
-        .unwrap_or_default();
-
-    let authors: Vec<String> = work
-        .author
-        .as_ref()
-        .map(|v| {
-            v.iter()
-                .map(|c| {
-                    let given = c.given.as_deref().unwrap_or("").trim();
-                    let family = c.family.clone();
-                    format!("{} {}", given, family).trim().to_string()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let volume = work.volume.clone().unwrap_or_default();
-    let issue = work.issue.clone().unwrap_or_default();
-    let pages = work.page.clone().unwrap_or_default(); // note `page` field in Work
-    let issn = work.issn.as_ref().map(|v| v.join(", ")).unwrap_or_default();
-    let publisher = work.publisher.clone();
-    let doi_url = work.url.clone();
-
-    let abstract_text = work
-        .abstract_
-        .as_ref()
-        .map(|s| clean_jats(s))
-        .unwrap_or_default();
+    let abstract_text = work.abstract_text().unwrap_or_default();
 
     // 4. Citation key
     // let key = format!(
@@ -302,34 +463,23 @@ pub fn add_reference(all_bib: &str, doi: &str) -> Result<String> {
     entry.set("abstract",  field(&abstract_text));
 
 
-    // 6. Unpaywall PDF
-    let unpaywall_url = format!(
-        "https://api.unpaywall.org/v2/{doi}?email=your@email.com"
-    );
-    let up: Value = blocking::get(&unpaywall_url)?.json()?;
-
-    if let Some(url) = up["best_oa_location"]["url_for_pdf"].as_str() {
-        fs::create_dir_all("pdfs")?;
-        let filename = doi.replace("/", "-") + ".pdf";
-        let path = format!("pdfs/{filename}");
-
-        let resp = blocking::get(url)?;
-        if resp
-            .headers()
-            .get("content-type")
-            .and_then(|h| h.to_str().ok())
-            .map(|ct| ct.contains("pdf"))
-            .unwrap_or(false)
-        {
-            fs::write(&path, resp.bytes()?)?;
-            entry.set("file", field(path));
-        }
-    }
-
-    // 7. Add + save
+    // 6. Add + save. Do this *before* the PDF lookup so that a hiccup in the
+    //    optional Unpaywall step can never cost us the metadata.
     bib.insert(entry);
     // fs::write(&all_bib, bib.to_bibtex_string())?;
     fs::write(&all_bib, bib.to_biblatex_string())?;
+
+    // 7. Unpaywall PDF — best-effort, failures are deliberately swallowed.
+    if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
+        if let Ok(dest) = pdf_dest_for_entry(all_bib, pdfs_dir, &key) {
+            if let Ok(true) = fetch_oa_pdf(doi, email, &dest) {
+                if let Some(entry) = bib.get_mut(&key) {
+                    entry.set("file", field(dest.to_string_lossy()));
+                    fs::write(&all_bib, bib.to_biblatex_string())?;
+                }
+            }
+        }
+    }
 
     Ok(key)
 }
@@ -422,18 +572,9 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
         Bibliography::parse(&all_content)?
     };
 
-    let normalize_doi = |s: &str| -> String {
-        let lower = s.trim().to_lowercase();
-        lower
-            .strip_prefix("https://doi.org/")
-            .or_else(|| lower.strip_prefix("http://doi.org/"))
-            .unwrap_or(&lower)
-            .to_string()
-    };
-
     let entry_doi = |e: &Entry| -> Option<String> {
         e.get("doi")
-            .map(|c| normalize_doi(&chunks_to_string(c)))
+            .map(|c| normalize_doi(&chunks_to_string(c)).to_lowercase())
             .filter(|s| !s.is_empty())
     };
 
@@ -484,6 +625,13 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
 
             let mut new_entry = entry.clone();
             new_entry.key = new_key.clone();
+            // External .bib files often carry the URL form; store the bare DOI.
+            if let Some(raw) = new_entry.get("doi").map(|c| chunks_to_string(c)) {
+                let bare = normalize_doi(&raw);
+                if bare != raw {
+                    new_entry.set("doi", field(&bare));
+                }
+            }
             all_bib.insert(new_entry);
             new_key
         };
@@ -493,6 +641,76 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
 
     fs::write(all_bib_path, all_bib.to_biblatex_string())?;
     Ok(keys)
+}
+
+/// Result of reading a plain-text DOI list: the DOIs found, in file order and
+/// de-duplicated, plus the lines that held no recognisable DOI.
+#[derive(Debug, Default)]
+pub struct DoiList {
+    pub dois: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// Parse a file containing one DOI per line. Blank lines and lines starting
+/// with `#` or `%` are ignored. A DOI is matched anywhere in the line, so
+/// `10.1000/x`, `doi:10.1000/x` and `https://doi.org/10.1000/x` all work.
+pub fn parse_doi_list(path: &str) -> Result<DoiList> {
+    let content = fs::read_to_string(path)?;
+    let doi_re = Regex::new(r"10\.\d{4,}/\S+")?;
+
+    let mut list = DoiList::default();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('%') {
+            continue;
+        }
+        match doi_re.find(line) {
+            Some(m) => {
+                let doi = m
+                    .as_str()
+                    .trim_end_matches(['.', ',', ';', ')', ']', '>'])
+                    .to_string();
+                if seen.insert(doi.to_lowercase()) {
+                    list.dois.push(doi);
+                }
+            }
+            None => list.skipped.push(line.to_string()),
+        }
+    }
+
+    Ok(list)
+}
+
+/// Rewrite any `doi` field stored in URL form back to the bare DOI, for the
+/// whole library at once. Returns the keys that were changed. Entries that
+/// already hold a bare DOI are untouched, and the file is only written when
+/// something actually changed.
+pub fn normalize_stored_dois(all_bib_path: &str) -> Result<Vec<String>> {
+    let content = fs::read_to_string(all_bib_path)?;
+    let mut bib = Bibliography::parse(&content)?;
+
+    let fixes: Vec<(String, String)> = bib
+        .iter()
+        .filter_map(|e| {
+            let raw = chunks_to_string(e.get("doi")?);
+            let bare = normalize_doi(&raw);
+            (bare != raw).then(|| (e.key.clone(), bare))
+        })
+        .collect();
+
+    for (key, bare) in &fixes {
+        if let Some(entry) = bib.get_mut(key) {
+            entry.set("doi", field(bare));
+        }
+    }
+
+    if !fixes.is_empty() {
+        fs::write(all_bib_path, bib.to_biblatex_string())?;
+    }
+
+    Ok(fixes.into_iter().map(|(k, _)| k).collect())
 }
 
 pub fn rename_project(proj_map_path: &str, old_name: &str, new_name: &str) -> Result<()> {
@@ -548,7 +766,17 @@ pub fn lookup_doi_by_metadata(title: &str, author: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("No Crossref result for: {}", title))
 }
 
-pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
+/// Fill in an entry's missing fields from Crossref, and — when the entry has
+/// no PDF yet and an Unpaywall email is configured — try to fetch one too.
+///
+/// Returns `true` if a PDF was downloaded. As in `add_reference`, the PDF step
+/// is best-effort: its failures never undo the metadata that was just written.
+pub fn refetch_metadata(
+    all_bib_path: &str,
+    pdfs_dir: &str,
+    key: &str,
+    unpaywall_email: Option<&str>,
+) -> Result<bool> {
     let content = fs::read_to_string(all_bib_path)?;
     let mut bib = Bibliography::parse(&content)?;
 
@@ -561,12 +789,7 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
         .filter(|s| !s.trim().is_empty());
 
     let (doi, doi_was_missing) = if let Some(stored) = stored_doi {
-        let cleaned = stored
-            .strip_prefix("https://doi.org/")
-            .or_else(|| stored.strip_prefix("http://doi.org/"))
-            .unwrap_or(&stored)
-            .to_string();
-        (cleaned, false)
+        (normalize_doi(&stored), false)
     } else {
         let title = entry.get("title")
             .map(|c| chunks_to_string(c))
@@ -581,13 +804,7 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
         (lookup_doi_by_metadata(&title, &author)?, true)
     };
 
-    let client = Crossref::builder()
-        .build()
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-
-    let work = client
-        .work(&doi)
-        .map_err(|e| anyhow::anyhow!("Crossref error: {e:?}"))?;
+    let work = fetch_crossref_work(&doi)?;
 
     // Refetch only missing or empty fields
     let entry = bib.get_mut(key).unwrap();
@@ -598,7 +815,9 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
             .unwrap_or(true)
     };
 
-    if doi_was_missing {
+    // Write the DOI back when it was missing, and also when it was stored in
+    // URL form — `doi` is already normalized at this point.
+    if doi_was_missing || chunks_to_string(entry.get("doi").unwrap_or(&vec![])) != doi {
         entry.set("doi", field(&doi));
     }
 
@@ -609,7 +828,7 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
     }
 
     if is_empty(entry, "journal") {
-        if let Some(journal) = work.container_title.as_ref().and_then(|v| v.get(0)) {
+        if let Some(journal) = work.journal() {
             entry.set("journal", field(journal));
         }
     }
@@ -632,22 +851,38 @@ pub fn refetch_metadata(all_bib_path: &str, key: &str) -> Result<()> {
         }
     }
 
-    if is_empty(entry, "issn") {
-        if let Some(issn) = &work.issn {
-            entry.set("issn", field(issn.join(", ")));
+    if is_empty(entry, "issn") && !work.issn.is_empty() {
+        entry.set("issn", field(work.issn.join(", ")));
+    }
+
+    if is_empty(entry, "publisher") {
+        if let Some(publisher) = work.publisher.as_deref().filter(|p| !p.is_empty()) {
+            entry.set("publisher", field(publisher));
         }
     }
 
-    if is_empty(entry, "publisher") && !work.publisher.is_empty() {
-        entry.set("publisher", field(&work.publisher));
-    }
-
-    if is_empty(entry, "url") && !work.url.is_empty() {
-        entry.set("url", field(&work.url));
+    if is_empty(entry, "url") {
+        if let Some(url) = work.url.as_deref().filter(|u| !u.is_empty()) {
+            entry.set("url", field(url));
+        }
     }
 
     fs::write(all_bib_path, bib.to_biblatex_string())?;
-    Ok(())
+
+    // Look for an open-access PDF, but only if this entry hasn't got one.
+    if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
+        if let Ok(dest) = pdf_dest_for_entry(all_bib_path, pdfs_dir, key) {
+            if !dest.exists() && fetch_oa_pdf(&doi, email, &dest).unwrap_or(false) {
+                if let Some(entry) = bib.get_mut(key) {
+                    entry.set("file", field(dest.to_string_lossy()));
+                    fs::write(all_bib_path, bib.to_biblatex_string())?;
+                }
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 pub fn extract_doi_from_pdf(pdf_path: &str) -> Option<String> {
@@ -670,34 +905,33 @@ pub fn extract_doi_from_pdf(pdf_path: &str) -> Option<String> {
         .map(|m| m.as_str().trim_end_matches('.').to_string())
 }
 
-pub fn link_pdf_to_entry(all_bib_path: &str, pdfs_dir: &str, key: &str, pdf_path: &str) -> Result<()> {
+/// Compute the would-be destination path for an entry's PDF.
+/// Callers can use this to check `dest.exists()` before calling
+/// `link_pdf_to_entry`, so they can ask the user before overwriting.
+pub fn pdf_dest_for_entry(all_bib_path: &str, pdfs_dir: &str, key: &str) -> Result<PathBuf> {
     let content = fs::read_to_string(all_bib_path)?;
-    let mut bib = Bibliography::parse(&content)?;
+    let bib = Bibliography::parse(&content)?;
 
-    let entry = bib.get_mut(key)
+    let entry = bib.get(key)
         .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))?;
 
-    // Get DOI to use as filename
     let doi = entry.get("doi")
         .map(|c| chunks_to_string(c))
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("No DOI found for '{}'", key))?;
 
-    // Sanitize DOI for use as filename
-    let filename = doi
-        .strip_prefix("https://doi.org/")
-        .or_else(|| doi.strip_prefix("http://doi.org/"))
-        .unwrap_or(&doi)
-        .replace('/', "-");
+    let filename = normalize_doi(&doi).replace('/', "-");
 
+    Ok(PathBuf::from(pdfs_dir).join(format!("{filename}.pdf")))
+}
+
+pub fn link_pdf_to_entry(all_bib_path: &str, pdfs_dir: &str, key: &str, pdf_path: &str, overwrite: bool) -> Result<()> {
+    let dest = pdf_dest_for_entry(all_bib_path, pdfs_dir, key)?;
     fs::create_dir_all(pdfs_dir)?;
-    let dest = std::path::PathBuf::from(pdfs_dir).join(format!("{filename}.pdf"));
-
-    // Only copy if not already there
-    if !dest.exists() {
-        fs::copy(pdf_path, &dest)?;
+    if dest.exists() && !overwrite {
+        return Ok(());
     }
-
+    fs::copy(pdf_path, &dest)?;
     Ok(())
 }
 
@@ -706,6 +940,11 @@ pub struct Config {
     pub projects_file: PathBuf,
     pub pdfs_dir: PathBuf,
     pub all_bib: PathBuf,
+    /// Address sent to Unpaywall when looking for open-access PDFs. Their API
+    /// requires a real one and throttles junk addresses; when this is unset the
+    /// PDF lookup is skipped entirely rather than sent with a placeholder.
+    #[serde(default)]
+    pub unpaywall_email: Option<String>,
 }
 
 // pub fn load_config() -> Config {
@@ -737,10 +976,17 @@ pub fn load_config() -> Config {
         let pdfs_dir  = prompt("Path to your PDFs directory",     "~/.local/share/bshelf/pdfs");
         let proj_file = prompt("Path to your projects.json file", "~/.local/share/bshelf/projects.json");
 
-        let contents = format!(
+        println!("\nUnpaywall looks for free PDFs of the papers you add.");
+        println!("It requires a real email address; leave blank to skip PDF lookups.");
+        let email = prompt("Your email for Unpaywall", "");
+
+        let mut contents = format!(
             "all_bib = \"{}\"\npdfs_dir = \"{}\"\nprojects_file = \"{}\"\n",
             all_bib, pdfs_dir, proj_file
         );
+        if !email.trim().is_empty() {
+            contents.push_str(&format!("unpaywall_email = \"{}\"\n", email.trim()));
+        }
 
         fs::create_dir_all(&config_dir)
             .expect("Could not create config directory");
@@ -785,7 +1031,11 @@ pub fn load_config() -> Config {
 
 fn prompt(label: &str, default: &str) -> String {
     use std::io::Write;
-    print!("{} [{}]: ", label, default);
+    if default.is_empty() {
+        print!("{}: ", label);
+    } else {
+        print!("{} [{}]: ", label, default);
+    }
     std::io::stdout().flush().unwrap();
 
     let mut input = String::new();
@@ -813,30 +1063,25 @@ pub fn find_existing_by_doi(all_bib_path: &str, doi: &str) -> Option<String> {
     let content = std::fs::read_to_string(all_bib_path).ok()?;
     let bib = biblatex::Bibliography::parse(&content).ok()?;
 
-    // Normalise to bare DOI for comparison
-    // let bare = doi
-    //     .strip_prefix("https://doi.org/")
-    //     .or_else(|| doi.strip_prefix("http://doi.org/"))
-    //     .unwrap_or(doi)
-    //     .to_lowercase();
-
     bib.iter().find(|e| {
         e.get("doi")
             .map(|chunks| {
-                let stored = chunks_to_string(chunks).to_lowercase();
                 // Match whether stored as bare DOI or full URL
-                let stored_bare = stored
-                    .strip_prefix("https://doi.org/")
-                    .or_else(|| stored.strip_prefix("http://doi.org/"))
-                    .unwrap_or(&stored);
-                stored_bare == doi.to_lowercase()
+                normalize_doi(&chunks_to_string(chunks)).to_lowercase()
+                    == normalize_doi(doi).to_lowercase()
             })
             .unwrap_or(false)
     })
     .map(|e| e.key.clone())
 }
 
-pub fn add_reference_by_metadata(all_bib: &str, title: &str, author: &str) -> Result<String> {
+pub fn add_reference_by_metadata(
+    all_bib: &str,
+    pdfs_dir: &str,
+    title: &str,
+    author: &str,
+    unpaywall_email: Option<&str>,
+) -> Result<String> {
     let content = fs::read_to_string(all_bib)?;
     let bib = Bibliography::parse(&content)?;
 
@@ -852,7 +1097,7 @@ pub fn add_reference_by_metadata(all_bib: &str, title: &str, author: &str) -> Re
     }
 
     let doi = lookup_doi_by_metadata(title, author)?;
-    add_reference(all_bib, &doi)
+    add_reference(all_bib, pdfs_dir, &doi, unpaywall_email)
 }
 
 #[cfg(test)]
@@ -1081,6 +1326,115 @@ mod tests {
             chunks_to_string(original.get("doi").unwrap()).to_lowercase(),
             "10.1000/a"
         );
+    }
+
+    // ── normalize_doi ────────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_doi_strips_every_common_prefix() {
+        for input in [
+            "10.1000/aB",
+            "https://doi.org/10.1000/aB",
+            "http://doi.org/10.1000/aB",
+            "https://dx.doi.org/10.1000/aB",
+            "HTTPS://DOI.ORG/10.1000/aB",
+            "doi:10.1000/aB",
+            "DOI:10.1000/aB",
+            "  https://doi.org/10.1000/aB  ",
+        ] {
+            assert_eq!(normalize_doi(input), "10.1000/aB", "input was {input}");
+        }
+    }
+
+    #[test]
+    fn normalize_doi_leaves_a_bare_doi_alone() {
+        // Including one with a slash-heavy suffix that must survive intact.
+        assert_eq!(normalize_doi("10.1002/(sici)1097-0134(1999)37:2<228::aid>3.0.co;2-5"),
+                   "10.1002/(sici)1097-0134(1999)37:2<228::aid>3.0.co;2-5");
+    }
+
+    #[test]
+    fn normalize_stored_dois_rewrites_only_url_forms() {
+        let dir = tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "all.bib",
+            "@article{a, title = {A}, author = {X}, doi = {https://doi.org/10.1000/a}}\n\
+             @article{b, title = {B}, author = {Y}, doi = {10.1000/b}}\n\
+             @article{c, title = {C}, author = {Z}}",
+        );
+        let fixed = normalize_stored_dois(&path).unwrap();
+        assert_eq!(fixed, vec!["a".to_string()]);
+
+        let bib = Bibliography::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(chunks_to_string(bib.get("a").unwrap().get("doi").unwrap()), "10.1000/a");
+        assert_eq!(chunks_to_string(bib.get("b").unwrap().get("doi").unwrap()), "10.1000/b");
+        assert!(bib.get("c").unwrap().get("doi").is_none());
+
+        // Idempotent: a second pass changes nothing.
+        assert!(normalize_stored_dois(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_stores_bare_doi_for_url_form_entries() {
+        let dir = tempdir().unwrap();
+        let all = write_file(dir.path(), "all.bib", "");
+        let imp = write_file(
+            dir.path(),
+            "in.bib",
+            "@article{smith_2020, title = {T}, author = {Smith}, doi = {https://doi.org/10.1000/a}}",
+        );
+        import_bib_file(&all, &imp).unwrap();
+        let bib = Bibliography::parse(&std::fs::read_to_string(&all).unwrap()).unwrap();
+        assert_eq!(chunks_to_string(bib.get("smith_2020").unwrap().get("doi").unwrap()), "10.1000/a");
+    }
+
+    // ── parse_doi_list ───────────────────────────────────────────────────────
+
+    #[test]
+    fn doi_list_reads_one_doi_per_line() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "dois.txt", "10.1000/a\n10.1000/b\n");
+        let list = parse_doi_list(&path).unwrap();
+        assert_eq!(list.dois, vec!["10.1000/a".to_string(), "10.1000/b".to_string()]);
+        assert!(list.skipped.is_empty());
+    }
+
+    #[test]
+    fn doi_list_accepts_url_and_prefixed_forms() {
+        let dir = tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "dois.txt",
+            "https://doi.org/10.1000/a\ndoi: 10.1000/b\nDOI 10.1000/c.\n",
+        );
+        let list = parse_doi_list(&path).unwrap();
+        assert_eq!(
+            list.dois,
+            vec!["10.1000/a".to_string(), "10.1000/b".to_string(), "10.1000/c".to_string()]
+        );
+    }
+
+    #[test]
+    fn doi_list_skips_blanks_and_comments_and_dedupes() {
+        let dir = tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "dois.txt",
+            "# my reading list\n\n10.1000/a\n  10.1000/A  \n% latex comment\n10.1000/b\n",
+        );
+        let list = parse_doi_list(&path).unwrap();
+        assert_eq!(list.dois, vec!["10.1000/a".to_string(), "10.1000/b".to_string()]);
+        assert!(list.skipped.is_empty());
+    }
+
+    #[test]
+    fn doi_list_reports_lines_without_a_doi() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "dois.txt", "10.1000/a\nnot a doi at all\n");
+        let list = parse_doi_list(&path).unwrap();
+        assert_eq!(list.dois, vec!["10.1000/a".to_string()]);
+        assert_eq!(list.skipped, vec!["not a doi at all".to_string()]);
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub enum Mode {
     RenameProject,
     ConfirmDelete,
     ConfirmRemoveRef,
+    ConfirmReplacePdf,
     PdfDoi,
     ImportProject,
     ImportNewProject,
@@ -51,6 +52,7 @@ pub fn mode_name(mode: &Mode) -> &'static str {
         Mode::RenameProject    => "RENAME",
         Mode::ConfirmDelete    => "DELETE PROJECT",
         Mode::ConfirmRemoveRef => "REMOVE REF",
+        Mode::ConfirmReplacePdf=> "REPLACE PDF",
         Mode::Help             => "HELP",
         Mode::PdfDoi           => "PDF",
         Mode::ImportProject    => "IMPORT TO",
@@ -62,9 +64,34 @@ pub fn mode_name(mode: &Mode) -> &'static str {
 // FileBrowser
 // ----------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq)]
 pub enum FileBrowserMode {
     Bib,
     Pdf,
+    DoiList,
+}
+
+impl FileBrowserMode {
+    /// Which files this browser offers, besides directories.
+    pub fn accepts(&self, path: &std::path::Path) -> bool {
+        let ext = path.extension().and_then(|e| e.to_str());
+        match self {
+            FileBrowserMode::Bib => ext == Some("bib"),
+            FileBrowserMode::Pdf => ext == Some("pdf"),
+            // DOI lists are plain text and often carry no extension at all.
+            FileBrowserMode::DoiList => {
+                matches!(ext, None | Some("txt") | Some("text") | Some("doi") | Some("dois"))
+            }
+        }
+    }
+}
+
+/// What `pending_import_paths` holds, so the project picker knows which
+/// importer to run once a target project has been chosen.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ImportKind {
+    Bib,
+    DoiList,
 }
 
 pub struct FileBrowser {
@@ -98,15 +125,7 @@ impl FileBrowser {
                 let mut v: Vec<_> = rd
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
-                    .filter(|p| {
-                        p.is_dir() || p.extension()
-                            .and_then(|e| e.to_str())
-                            .map(|e| match self.browser_mode {
-                                FileBrowserMode::Bib => e == "bib",
-                                FileBrowserMode::Pdf => e == "pdf",
-                            })
-                            .unwrap_or(false)
-                    })
+                    .filter(|p| p.is_dir() || self.browser_mode.accepts(p))
                     .collect();
                 v.sort_by(|a, b| {
                     let da = a.is_dir();
@@ -202,12 +221,16 @@ pub struct App {
     pub rename_project_name: String,
     pub project_scroll: usize,
     pub ref_scroll: usize,
+    pub ref_panel_visible: usize,
     pub detail_scroll: usize,
     pub pending_pdf_path: Option<std::path::PathBuf>,
+    pub pending_link_key: Option<String>,
+    pub pending_replace_pdf: Option<(String, std::path::PathBuf)>,
     pub pdf_doi_input: String,
     pub clipboard: Option<arboard::Clipboard>,
     pub help_scroll: usize,
     pub pending_import_paths: Vec<std::path::PathBuf>,
+    pub pending_import_kind: ImportKind,
     pub import_project_target: usize,  // index into the picker list
     pub import_new_project_name: String,
     pub search_all_refs: Vec<Entry>,
@@ -248,12 +271,16 @@ impl App {
             rename_project_name: String::new(),
             project_scroll: 0,
             ref_scroll: 0,
+            ref_panel_visible: 10,
             detail_scroll: 0,
             pending_pdf_path: None,
+            pending_link_key: None,
+            pending_replace_pdf: None,
             pdf_doi_input: String::new(),
             clipboard: arboard::Clipboard::new().ok(),
             help_scroll: 0,
             pending_import_paths: Vec::new(),
+            pending_import_kind: ImportKind::Bib,
             import_project_target: 0,
             import_new_project_name: String::new(),
             search_all_refs: Vec::new(),
@@ -371,6 +398,7 @@ impl App {
 
     pub fn sync_ref_scroll(&mut self, panel_height: usize) {
         let visible = panel_height.saturating_sub(2);
+        self.ref_panel_visible = visible.max(1);
         if self.selected_reference < self.ref_scroll {
             self.ref_scroll = self.selected_reference;
         } else if self.selected_reference >= self.ref_scroll + visible {
@@ -416,15 +444,8 @@ impl App {
 
     pub fn log(&self, msg: &str) {
         use std::io::Write;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| {
-                let secs = d.as_secs();
-                let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
-                format!("{:02}:{:02}:{:02}", h, m, s)
-            })
-            .unwrap_or_else(|_| "??:??:??".to_string());
-    
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
