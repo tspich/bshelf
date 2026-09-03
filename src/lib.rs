@@ -484,8 +484,15 @@ pub fn add_reference(
     Ok(key)
 }
 
+/// True when `query` occurs, case-insensitively, in the entry's citation key,
+/// title, authors, year or DOI.
 pub fn entry_matches(entry: &biblatex::Entry, query: &str) -> bool {
     let query = query.to_lowercase();
+
+    // -------- KEY --------
+    if entry.key.to_lowercase().contains(&query) {
+        return true;
+    }
 
     // -------- TITLE --------
     let title_match = entry
@@ -520,7 +527,38 @@ pub fn entry_matches(entry: &biblatex::Entry, query: &str) -> bool {
             })
         })
         .unwrap_or(false);
-    author_match
+
+    if author_match {
+        return true;
+    }
+
+    // -------- YEAR --------
+    // bshelf writes `date`, but imported .bib files often carry `year` instead,
+    // so check both. Match on a prefix rather than a substring: a bare "19"
+    // should not pull in every 20th-century reference, and "2019" should still
+    // match a full date like "2019-04-12".
+    let year_match = ["date", "year"].iter().any(|f| {
+        entry
+            .get(f)
+            .map(|chunks| chunks_to_string(chunks).trim().to_lowercase().starts_with(&query))
+            .unwrap_or(false)
+    });
+
+    if year_match {
+        return true;
+    }
+
+    // -------- DOI --------
+    // Normalised so a pasted https://doi.org/... URL matches an entry storing
+    // the bare DOI, and vice versa.
+    entry
+        .get("doi")
+        .map(|chunks| {
+            normalize_doi(&chunks_to_string(chunks))
+                .to_lowercase()
+                .contains(&normalize_doi(&query))
+        })
+        .unwrap_or(false)
 }
 
 pub fn open_editor(path: &str, key: &str) -> io::Result<()> {
@@ -1134,6 +1172,48 @@ mod tests {
         assert!(entry_matches(&e, "smith"));
         assert!(entry_matches(&e, "jane"));
         assert!(!entry_matches(&e, "wong"));
+    }
+
+    #[test]
+    fn entry_matches_citation_key() {
+        let e = parse_one("@article{smith_2020a, title = {X}, author = {Jane Doe}}");
+        assert!(entry_matches(&e, "smith_2020a"));
+        assert!(entry_matches(&e, "SMITH_2020"));
+        assert!(entry_matches(&e, "_2020"));
+        assert!(!entry_matches(&e, "jones_2020"));
+    }
+
+    #[test]
+    fn entry_matches_year_from_date_or_year_field() {
+        let dated = parse_one("@article{a, title = {X}, author = {Jane Doe}, date = {2019-04-12}}");
+        assert!(entry_matches(&dated, "2019"));
+        assert!(entry_matches(&dated, "2019-04"));
+        assert!(!entry_matches(&dated, "2018"));
+
+        let yeared = parse_one("@article{b, title = {X}, author = {Jane Doe}, year = {1998}}");
+        assert!(entry_matches(&yeared, "1998"));
+        assert!(!entry_matches(&yeared, "1999"));
+    }
+
+    #[test]
+    fn entry_matches_year_is_a_prefix_not_a_substring() {
+        // "19" must not drag in every 20th-century entry via a bare substring.
+        let e = parse_one("@article{a, title = {X}, author = {Jane Doe}, date = {2019}}");
+        assert!(!entry_matches(&e, "19"));
+        assert!(entry_matches(&e, "20"));
+    }
+
+    #[test]
+    fn entry_matches_doi_bare_and_url_form() {
+        let e = parse_one("@article{a, title = {X}, author = {Jane Doe}, doi = {10.1128/MCB.10.5.1940}}");
+        assert!(entry_matches(&e, "10.1128/mcb.10.5.1940"));
+        assert!(entry_matches(&e, "10.1128"));
+        assert!(entry_matches(&e, "https://doi.org/10.1128/MCB.10.5.1940"));
+        assert!(!entry_matches(&e, "10.9999/nope"));
+
+        let stored_as_url =
+            parse_one("@article{b, title = {X}, author = {Jane Doe}, doi = {https://doi.org/10.1000/A}}");
+        assert!(entry_matches(&stored_as_url, "10.1000/a"));
     }
 
     // ── project map CRUD ─────────────────────────────────────────────────────

@@ -350,6 +350,14 @@ impl App {
                 .filter(|entry| entry_matches(entry, &query))
                 .collect();
 
+            // biblatex iterates in file order, so results would otherwise appear
+            // in the order they were appended to all.bib. Sort here rather than
+            // in update_filtered_for_project: filtered_refs is always derived
+            // from this list, so one sort keeps both views consistent with
+            // load_references.
+            self.search_all_refs
+                .sort_by(|a, b| a.key.to_lowercase().cmp(&b.key.to_lowercase()));
+
             self.update_filtered_for_project();
         }
         self.selected_reference = 0;
