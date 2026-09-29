@@ -10,6 +10,7 @@ use bshelf::{
     add_to_project,
     delete_project,
     export_project_bib,
+    entry_to_bibtex,
     extract_doi_from_pdf,
     find_existing_by_doi,
     import_bib_file,
@@ -636,7 +637,7 @@ pub fn handle_key(
             };
             if let Some(entry) = active_refs.get(app.selected_reference) {
                 let key = entry.key.clone();
-                let bib_str = entry.to_biblatex_string();
+                let bib_str = entry_to_bibtex(entry);
                 match app.clipboard.as_mut().map(|cb| cb.set_text(&bib_str)) {
                     Some(Ok(_))  => app.show_alert(&format!("Copied entry '{}' to clipboard", key)),
                     Some(Err(e)) => app.show_alert(&format!("Clipboard error: {e}")),

@@ -80,6 +80,30 @@ pub fn normalize_doi(doi: &str) -> String {
 
 pub type ProjectsMap = HashMap<String, Vec<String>>;
 
+/// Serialize one entry as BibTeX — the format bshelf writes everywhere
+/// (`all.bib`, project exports, clipboard copies).
+///
+/// The crate converts BibLaTeX-only names on the way out (`journaltitle` →
+/// `journal`, `date` → `year`/`month`, `location` → `address`). Its conversion
+/// can only fail on a `date` it cannot map; rather than lose the entry, fall
+/// back to BibLaTeX for that one entry.
+pub fn entry_to_bibtex(entry: &Entry) -> String {
+    entry
+        .to_bibtex_string()
+        .unwrap_or_else(|_| entry.to_biblatex_string())
+}
+
+/// Serialize a whole bibliography as BibTeX. Use this instead of
+/// `Bibliography::to_bibtex_string`, which panics if any single entry fails
+/// to convert — that would take down every save, not just one entry.
+pub fn bib_to_bibtex(bib: &Bibliography) -> String {
+    let mut out = bib.iter().map(entry_to_bibtex).collect::<Vec<_>>().join("\n\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
 pub fn chunks_to_string(chunks: &[Spanned<Chunk>]) -> String {
     chunks
         .iter()
@@ -451,10 +475,12 @@ pub fn add_reference(
 
     entry.set("title",     field(title));
     entry.set("author",    field(authors.join(" and ")));
-    entry.set("date",      field(&year));
+    // BibTeX field names: `year`, not BibLaTeX's `date`; `number` for the
+    // issue, since BibTeX styles ignore `issue`.
+    entry.set("year",      field(&year));
     entry.set("journal",   field(journal));
     entry.set("volume",    field(&volume));
-    entry.set("issue",     field(&issue));
+    entry.set("number",    field(&issue));
     entry.set("pages",     field(&pages));
     entry.set("issn",      field(&issn));
     entry.set("publisher", field(&publisher));
@@ -466,8 +492,7 @@ pub fn add_reference(
     // 6. Add + save. Do this *before* the PDF lookup so that a hiccup in the
     //    optional Unpaywall step can never cost us the metadata.
     bib.insert(entry);
-    // fs::write(&all_bib, bib.to_bibtex_string())?;
-    fs::write(&all_bib, bib.to_biblatex_string())?;
+    fs::write(&all_bib, bib_to_bibtex(&bib))?;
 
     // 7. Unpaywall PDF — best-effort, failures are deliberately swallowed.
     if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
@@ -475,7 +500,7 @@ pub fn add_reference(
             if let Ok(true) = fetch_oa_pdf(doi, email, &dest) {
                 if let Some(entry) = bib.get_mut(&key) {
                     entry.set("file", field(dest.to_string_lossy()));
-                    fs::write(&all_bib, bib.to_biblatex_string())?;
+                    fs::write(&all_bib, bib_to_bibtex(&bib))?;
                 }
             }
         }
@@ -595,7 +620,7 @@ pub fn export_project_bib(all_bib_path: &str, proj_map_path: &str, project: &str
         }
     }
 
-    fs::write(output_path, project_bib.to_biblatex_string())?;
+    fs::write(output_path, bib_to_bibtex(&project_bib))?;
     Ok(())
 }
 
@@ -677,7 +702,7 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
         keys.push(key);
     }
 
-    fs::write(all_bib_path, all_bib.to_biblatex_string())?;
+    fs::write(all_bib_path, bib_to_bibtex(&all_bib))?;
     Ok(keys)
 }
 
@@ -745,7 +770,7 @@ pub fn normalize_stored_dois(all_bib_path: &str) -> Result<Vec<String>> {
     }
 
     if !fixes.is_empty() {
-        fs::write(all_bib_path, bib.to_biblatex_string())?;
+        fs::write(all_bib_path, bib_to_bibtex(&bib))?;
     }
 
     Ok(fixes.into_iter().map(|(k, _)| k).collect())
@@ -865,7 +890,8 @@ pub fn refetch_metadata(
         }
     }
 
-    if is_empty(entry, "journal") {
+    // `journaltitle` is how the same field reads in files written as BibLaTeX.
+    if is_empty(entry, "journal") && is_empty(entry, "journaltitle") {
         if let Some(journal) = work.journal() {
             entry.set("journal", field(journal));
         }
@@ -877,9 +903,11 @@ pub fn refetch_metadata(
         }
     }
 
-    if is_empty(entry, "issue") {
+    // Older entries hold the issue in BibLaTeX's `issue`; only fill `number`
+    // when neither is present, so those are not duplicated.
+    if is_empty(entry, "number") && is_empty(entry, "issue") {
         if let Some(issue) = &work.issue {
-            entry.set("issue", field(issue));
+            entry.set("number", field(issue));
         }
     }
 
@@ -905,7 +933,7 @@ pub fn refetch_metadata(
         }
     }
 
-    fs::write(all_bib_path, bib.to_biblatex_string())?;
+    fs::write(all_bib_path, bib_to_bibtex(&bib))?;
 
     // Look for an open-access PDF, but only if this entry hasn't got one.
     if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
@@ -913,7 +941,7 @@ pub fn refetch_metadata(
             if !dest.exists() && fetch_oa_pdf(&doi, email, &dest).unwrap_or(false) {
                 if let Some(entry) = bib.get_mut(key) {
                     entry.set("file", field(dest.to_string_lossy()));
-                    fs::write(all_bib_path, bib.to_biblatex_string())?;
+                    fs::write(all_bib_path, bib_to_bibtex(&bib))?;
                 }
                 return Ok(true);
             }
@@ -1152,6 +1180,40 @@ mod tests {
 
     fn parse_one(s: &str) -> Entry {
         Bibliography::parse(s).unwrap().iter().next().unwrap().clone()
+    }
+
+    // ── BibTeX serialization ─────────────────────────────────────────────────
+
+    #[test]
+    fn bibtex_output_uses_bibtex_field_names() {
+        let bib = Bibliography::parse(
+            "@article{a, title = {T}, author = {Doe, Jane}, journaltitle = {Cell}, \
+             date = {2019-04-12}, location = {Berlin}}",
+        )
+        .unwrap();
+        let out = bib_to_bibtex(&bib);
+        assert!(out.contains("journal = {Cell}"), "{out}");
+        assert!(out.contains("year = {2019}"), "{out}");
+        assert!(out.contains("address = {Berlin}"), "{out}");
+        assert!(!out.contains("journaltitle"), "{out}");
+        assert!(!out.contains("date ="), "{out}");
+    }
+
+    #[test]
+    fn bibtex_roundtrip_keeps_every_entry() {
+        let bib = Bibliography::parse(
+            "@article{a, title = {One}, author = {Doe, J}, year = {1998}}\n\
+             @article{b, title = {Two}, author = {Roe, R}, date = {n.d.}}",
+        )
+        .unwrap();
+        let again = Bibliography::parse(&bib_to_bibtex(&bib)).unwrap();
+        assert_eq!(again.iter().count(), 2);
+        assert!(again.get("a").is_some() && again.get("b").is_some());
+    }
+
+    #[test]
+    fn bibtex_of_empty_bibliography_is_empty() {
+        assert_eq!(bib_to_bibtex(&Bibliography::new()), "");
     }
 
     // ── entry_matches ────────────────────────────────────────────────────────
