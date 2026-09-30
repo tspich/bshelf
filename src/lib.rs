@@ -80,6 +80,30 @@ pub fn normalize_doi(doi: &str) -> String {
 
 pub type ProjectsMap = HashMap<String, Vec<String>>;
 
+/// Serialize one entry as BibTeX — the format bshelf writes everywhere
+/// (`all.bib`, project exports, clipboard copies).
+///
+/// The crate converts BibLaTeX-only names on the way out (`journaltitle` →
+/// `journal`, `date` → `year`/`month`, `location` → `address`). Its conversion
+/// can only fail on a `date` it cannot map; rather than lose the entry, fall
+/// back to BibLaTeX for that one entry.
+pub fn entry_to_bibtex(entry: &Entry) -> String {
+    entry
+        .to_bibtex_string()
+        .unwrap_or_else(|_| entry.to_biblatex_string())
+}
+
+/// Serialize a whole bibliography as BibTeX. Use this instead of
+/// `Bibliography::to_bibtex_string`, which panics if any single entry fails
+/// to convert — that would take down every save, not just one entry.
+pub fn bib_to_bibtex(bib: &Bibliography) -> String {
+    let mut out = bib.iter().map(entry_to_bibtex).collect::<Vec<_>>().join("\n\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
 pub fn chunks_to_string(chunks: &[Spanned<Chunk>]) -> String {
     chunks
         .iter()
@@ -451,10 +475,12 @@ pub fn add_reference(
 
     entry.set("title",     field(title));
     entry.set("author",    field(authors.join(" and ")));
-    entry.set("date",      field(&year));
+    // BibTeX field names: `year`, not BibLaTeX's `date`; `number` for the
+    // issue, since BibTeX styles ignore `issue`.
+    entry.set("year",      field(&year));
     entry.set("journal",   field(journal));
     entry.set("volume",    field(&volume));
-    entry.set("issue",     field(&issue));
+    entry.set("number",    field(&issue));
     entry.set("pages",     field(&pages));
     entry.set("issn",      field(&issn));
     entry.set("publisher", field(&publisher));
@@ -466,8 +492,7 @@ pub fn add_reference(
     // 6. Add + save. Do this *before* the PDF lookup so that a hiccup in the
     //    optional Unpaywall step can never cost us the metadata.
     bib.insert(entry);
-    // fs::write(&all_bib, bib.to_bibtex_string())?;
-    fs::write(&all_bib, bib.to_biblatex_string())?;
+    fs::write(&all_bib, bib_to_bibtex(&bib))?;
 
     // 7. Unpaywall PDF — best-effort, failures are deliberately swallowed.
     if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
@@ -475,7 +500,7 @@ pub fn add_reference(
             if let Ok(true) = fetch_oa_pdf(doi, email, &dest) {
                 if let Some(entry) = bib.get_mut(&key) {
                     entry.set("file", field(dest.to_string_lossy()));
-                    fs::write(&all_bib, bib.to_biblatex_string())?;
+                    fs::write(&all_bib, bib_to_bibtex(&bib))?;
                 }
             }
         }
@@ -484,8 +509,15 @@ pub fn add_reference(
     Ok(key)
 }
 
+/// True when `query` occurs, case-insensitively, in the entry's citation key,
+/// title, authors, year or DOI.
 pub fn entry_matches(entry: &biblatex::Entry, query: &str) -> bool {
     let query = query.to_lowercase();
+
+    // -------- KEY --------
+    if entry.key.to_lowercase().contains(&query) {
+        return true;
+    }
 
     // -------- TITLE --------
     let title_match = entry
@@ -520,7 +552,38 @@ pub fn entry_matches(entry: &biblatex::Entry, query: &str) -> bool {
             })
         })
         .unwrap_or(false);
-    author_match
+
+    if author_match {
+        return true;
+    }
+
+    // -------- YEAR --------
+    // bshelf writes `date`, but imported .bib files often carry `year` instead,
+    // so check both. Match on a prefix rather than a substring: a bare "19"
+    // should not pull in every 20th-century reference, and "2019" should still
+    // match a full date like "2019-04-12".
+    let year_match = ["date", "year"].iter().any(|f| {
+        entry
+            .get(f)
+            .map(|chunks| chunks_to_string(chunks).trim().to_lowercase().starts_with(&query))
+            .unwrap_or(false)
+    });
+
+    if year_match {
+        return true;
+    }
+
+    // -------- DOI --------
+    // Normalised so a pasted https://doi.org/... URL matches an entry storing
+    // the bare DOI, and vice versa.
+    entry
+        .get("doi")
+        .map(|chunks| {
+            normalize_doi(&chunks_to_string(chunks))
+                .to_lowercase()
+                .contains(&normalize_doi(&query))
+        })
+        .unwrap_or(false)
 }
 
 pub fn open_editor(path: &str, key: &str) -> io::Result<()> {
@@ -557,7 +620,7 @@ pub fn export_project_bib(all_bib_path: &str, proj_map_path: &str, project: &str
         }
     }
 
-    fs::write(output_path, project_bib.to_biblatex_string())?;
+    fs::write(output_path, bib_to_bibtex(&project_bib))?;
     Ok(())
 }
 
@@ -639,7 +702,7 @@ pub fn import_bib_file(all_bib_path: &str, import_path: &str) -> Result<Vec<Stri
         keys.push(key);
     }
 
-    fs::write(all_bib_path, all_bib.to_biblatex_string())?;
+    fs::write(all_bib_path, bib_to_bibtex(&all_bib))?;
     Ok(keys)
 }
 
@@ -707,7 +770,7 @@ pub fn normalize_stored_dois(all_bib_path: &str) -> Result<Vec<String>> {
     }
 
     if !fixes.is_empty() {
-        fs::write(all_bib_path, bib.to_biblatex_string())?;
+        fs::write(all_bib_path, bib_to_bibtex(&bib))?;
     }
 
     Ok(fixes.into_iter().map(|(k, _)| k).collect())
@@ -827,7 +890,8 @@ pub fn refetch_metadata(
         }
     }
 
-    if is_empty(entry, "journal") {
+    // `journaltitle` is how the same field reads in files written as BibLaTeX.
+    if is_empty(entry, "journal") && is_empty(entry, "journaltitle") {
         if let Some(journal) = work.journal() {
             entry.set("journal", field(journal));
         }
@@ -839,9 +903,11 @@ pub fn refetch_metadata(
         }
     }
 
-    if is_empty(entry, "issue") {
+    // Older entries hold the issue in BibLaTeX's `issue`; only fill `number`
+    // when neither is present, so those are not duplicated.
+    if is_empty(entry, "number") && is_empty(entry, "issue") {
         if let Some(issue) = &work.issue {
-            entry.set("issue", field(issue));
+            entry.set("number", field(issue));
         }
     }
 
@@ -867,7 +933,7 @@ pub fn refetch_metadata(
         }
     }
 
-    fs::write(all_bib_path, bib.to_biblatex_string())?;
+    fs::write(all_bib_path, bib_to_bibtex(&bib))?;
 
     // Look for an open-access PDF, but only if this entry hasn't got one.
     if let Some(email) = unpaywall_email.filter(|e| !e.trim().is_empty()) {
@@ -875,7 +941,7 @@ pub fn refetch_metadata(
             if !dest.exists() && fetch_oa_pdf(&doi, email, &dest).unwrap_or(false) {
                 if let Some(entry) = bib.get_mut(key) {
                     entry.set("file", field(dest.to_string_lossy()));
-                    fs::write(all_bib_path, bib.to_biblatex_string())?;
+                    fs::write(all_bib_path, bib_to_bibtex(&bib))?;
                 }
                 return Ok(true);
             }
@@ -1116,6 +1182,40 @@ mod tests {
         Bibliography::parse(s).unwrap().iter().next().unwrap().clone()
     }
 
+    // ── BibTeX serialization ─────────────────────────────────────────────────
+
+    #[test]
+    fn bibtex_output_uses_bibtex_field_names() {
+        let bib = Bibliography::parse(
+            "@article{a, title = {T}, author = {Doe, Jane}, journaltitle = {Cell}, \
+             date = {2019-04-12}, location = {Berlin}}",
+        )
+        .unwrap();
+        let out = bib_to_bibtex(&bib);
+        assert!(out.contains("journal = {Cell}"), "{out}");
+        assert!(out.contains("year = {2019}"), "{out}");
+        assert!(out.contains("address = {Berlin}"), "{out}");
+        assert!(!out.contains("journaltitle"), "{out}");
+        assert!(!out.contains("date ="), "{out}");
+    }
+
+    #[test]
+    fn bibtex_roundtrip_keeps_every_entry() {
+        let bib = Bibliography::parse(
+            "@article{a, title = {One}, author = {Doe, J}, year = {1998}}\n\
+             @article{b, title = {Two}, author = {Roe, R}, date = {n.d.}}",
+        )
+        .unwrap();
+        let again = Bibliography::parse(&bib_to_bibtex(&bib)).unwrap();
+        assert_eq!(again.iter().count(), 2);
+        assert!(again.get("a").is_some() && again.get("b").is_some());
+    }
+
+    #[test]
+    fn bibtex_of_empty_bibliography_is_empty() {
+        assert_eq!(bib_to_bibtex(&Bibliography::new()), "");
+    }
+
     // ── entry_matches ────────────────────────────────────────────────────────
 
     #[test]
@@ -1134,6 +1234,48 @@ mod tests {
         assert!(entry_matches(&e, "smith"));
         assert!(entry_matches(&e, "jane"));
         assert!(!entry_matches(&e, "wong"));
+    }
+
+    #[test]
+    fn entry_matches_citation_key() {
+        let e = parse_one("@article{smith_2020a, title = {X}, author = {Jane Doe}}");
+        assert!(entry_matches(&e, "smith_2020a"));
+        assert!(entry_matches(&e, "SMITH_2020"));
+        assert!(entry_matches(&e, "_2020"));
+        assert!(!entry_matches(&e, "jones_2020"));
+    }
+
+    #[test]
+    fn entry_matches_year_from_date_or_year_field() {
+        let dated = parse_one("@article{a, title = {X}, author = {Jane Doe}, date = {2019-04-12}}");
+        assert!(entry_matches(&dated, "2019"));
+        assert!(entry_matches(&dated, "2019-04"));
+        assert!(!entry_matches(&dated, "2018"));
+
+        let yeared = parse_one("@article{b, title = {X}, author = {Jane Doe}, year = {1998}}");
+        assert!(entry_matches(&yeared, "1998"));
+        assert!(!entry_matches(&yeared, "1999"));
+    }
+
+    #[test]
+    fn entry_matches_year_is_a_prefix_not_a_substring() {
+        // "19" must not drag in every 20th-century entry via a bare substring.
+        let e = parse_one("@article{a, title = {X}, author = {Jane Doe}, date = {2019}}");
+        assert!(!entry_matches(&e, "19"));
+        assert!(entry_matches(&e, "20"));
+    }
+
+    #[test]
+    fn entry_matches_doi_bare_and_url_form() {
+        let e = parse_one("@article{a, title = {X}, author = {Jane Doe}, doi = {10.1128/MCB.10.5.1940}}");
+        assert!(entry_matches(&e, "10.1128/mcb.10.5.1940"));
+        assert!(entry_matches(&e, "10.1128"));
+        assert!(entry_matches(&e, "https://doi.org/10.1128/MCB.10.5.1940"));
+        assert!(!entry_matches(&e, "10.9999/nope"));
+
+        let stored_as_url =
+            parse_one("@article{b, title = {X}, author = {Jane Doe}, doi = {https://doi.org/10.1000/A}}");
+        assert!(entry_matches(&stored_as_url, "10.1000/a"));
     }
 
     // ── project map CRUD ─────────────────────────────────────────────────────

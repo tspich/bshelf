@@ -2,6 +2,7 @@ use biblatex::Bibliography;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use std::process::Stdio;
 use std::{fs, io};
 
 use bshelf::{
@@ -9,6 +10,7 @@ use bshelf::{
     add_to_project,
     delete_project,
     export_project_bib,
+    entry_to_bibtex,
     extract_doi_from_pdf,
     find_existing_by_doi,
     import_bib_file,
@@ -299,8 +301,23 @@ pub fn handle_key(
                     .replace('/', "-");
                 let pdf_path = app.config.pdfs_dir.join(format!("{safe_name}.pdf"));
                 if pdf_path.exists() {
-                    if let Err(err) = std::process::Command::new("xdg-open").arg(&pdf_path).spawn() {
-                        app.show_alert(&format!("Failed to open PDF: {}", err));
+                    // The viewer keeps running alongside the TUI, so it must not
+                    // share our terminal: anything it writes (Poppler's "unexpected
+                    // tz val" and friends) would land on top of the rendered frame.
+                    // Null fds are inherited by whatever xdg-open execs.
+                    match std::process::Command::new("xdg-open")
+                        .arg(&pdf_path)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                    {
+                        // xdg-open exits as soon as it has handed off to the viewer.
+                        // Reap it so a long session does not pile up zombies.
+                        Ok(mut child) => {
+                            std::thread::spawn(move || { let _ = child.wait(); });
+                        }
+                        Err(err) => app.show_alert(&format!("Failed to open PDF: {}", err)),
                     }
                 } else {
                     app.show_alert(&format!("PDF not found: {}", pdf_path.display()));
@@ -620,7 +637,7 @@ pub fn handle_key(
             };
             if let Some(entry) = active_refs.get(app.selected_reference) {
                 let key = entry.key.clone();
-                let bib_str = entry.to_biblatex_string();
+                let bib_str = entry_to_bibtex(entry);
                 match app.clipboard.as_mut().map(|cb| cb.set_text(&bib_str)) {
                     Some(Ok(_))  => app.show_alert(&format!("Copied entry '{}' to clipboard", key)),
                     Some(Err(e)) => app.show_alert(&format!("Clipboard error: {e}")),
