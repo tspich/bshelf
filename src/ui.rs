@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect, Alignment},
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Clear, Wrap},
 };
 
@@ -10,11 +10,57 @@ use bshelf::{
     authors_to_string,
     chunks_to_string,
     date_to_year_string,
+    has_supp_files,
+    list_supp_files,
+    pdf_path_for_doi,
     publisher_string,
+    supp_dir_for_doi,
 };
 
 use crate::app::{App, ImportKind, Mode, mode_name};
 use crate::keybindings::{help_lines, mode_color};
+
+/// Nerd Font "file-pdf" glyph (U+F1C1), the one yazi shows for PDFs.
+/// Needs a Nerd Font in the terminal, as yazi does.
+const PDF_ICON: &str = "\u{f1c1}";
+const SI_MARK: &str = "[SI]";
+
+/// Cut `s` to at most `max` chars, ending in "…" when shortened.
+fn truncate_to(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        let mut t: String = s.chars().take(max - 1).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// Greedily pack hint items onto lines no wider than `width`, separated by
+/// three spaces, so a narrow window wraps the hints instead of cutting them.
+fn pack_hints(items: &[&str], width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for item in items {
+        let candidate = if cur.is_empty() {
+            format!(" {item}")
+        } else {
+            format!("{cur}   {item}")
+        };
+        if candidate.chars().count() > width && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+            cur = format!(" {item}");
+        } else {
+            cur = candidate;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
 
 /// Draw the entire TUI for one frame.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -70,6 +116,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.references.clone()
     };
 
+    let ref_inner_w = panels[1].width.saturating_sub(2) as usize;
     let visible_refs: Vec<ListItem> = refs_to_show
         .iter()
         .enumerate()
@@ -82,7 +129,33 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
-            ListItem::new(Span::styled(key, style))
+            // Only visible rows get here, so this is a handful of
+            // stat/read_dir calls per frame.
+            let doi = r.doi().ok().unwrap_or_default();
+            let has_pdf = !doi.is_empty() && pdf_path_for_doi(&app.config.pdfs_dir, &doi).exists();
+            let has_si = supp_dir_for_doi(&app.config.pdfs_dir, &doi)
+                .map(|d| has_supp_files(&d))
+                .unwrap_or(false);
+            // Fixed right-hand columns, so markers line up row to row:
+            // "[SI] " then the PDF icon. Key is truncated to make room.
+            let markers_w = SI_MARK.len() + 1 + 1;
+            let key_room = ref_inner_w.saturating_sub(markers_w + 1);
+            let key = truncate_to(&key, key_room);
+            let pad = ref_inner_w.saturating_sub(key.chars().count() + markers_w);
+            // DIM fades the row's own colour instead of picking a fixed grey:
+            // "dark gray" is the background colour in many dark themes.
+            let si_style = style.add_modifier(Modifier::DIM);
+            ListItem::new(Line::from(vec![
+                Span::styled(key, style),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(if has_si { SI_MARK } else { "    " }, si_style),
+                Span::raw(" "),
+                if has_pdf {
+                    Span::styled(PDF_ICON, Style::default().fg(Color::Red))
+                } else {
+                    Span::raw(" ")
+                },
+            ]))
         })
         .collect();
 
@@ -93,14 +166,30 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // ── Right panel: details ────────────────────────────────────────────────
     let details = if !refs_to_show.is_empty() && app.selected_reference < refs_to_show.len() {
         let r = &refs_to_show[app.selected_reference];
+        let doi = r.doi().ok().unwrap_or_default();
+        let pdf_line = if !doi.is_empty() && pdf_path_for_doi(&app.config.pdfs_dir, &doi).exists() {
+            "available (Enter to open)"
+        } else {
+            "none"
+        };
+        let supp_count = supp_dir_for_doi(&app.config.pdfs_dir, &doi)
+            .map(|d| list_supp_files(&d).len())
+            .unwrap_or(0);
+        let supp_line = match supp_count {
+            0 => "none".to_string(),
+            1 => "1 file (S to show)".to_string(),
+            n => format!("{n} files (S to show)"),
+        };
         format!(
-            "Title:\n{}\nAuthors:\n{}\nYear: {}\nJournal: {}\nDOI: {}\nPublisher: {}\nAbstract:\n {}",
+            "Title:\n{}\nAuthors:\n{}\nYear: {}\nJournal: {}\nDOI: {}\nPublisher: {}\nPDF: {}\nSupplementary: {}\nAbstract:\n {}",
             r.title().ok().map(chunks_to_string).unwrap_or_else(|| "<no title>".to_string()),
             r.author().ok().map(authors_to_string).unwrap_or_else(|| "no authors".to_string()),
             r.date().ok().and_then(date_to_year_string).unwrap_or_else(|| "<no year>".to_string()),
             r.journal().ok().map(chunks_to_string).unwrap_or_else(|| "<no journal>".to_string()),
             r.url().ok().as_deref().unwrap_or(""),
             r.publisher().ok().map(publisher_string).unwrap_or_else(|| "<no issn>".to_string()),
+            pdf_line,
+            supp_line,
             r.abstract_().ok().map(chunks_to_string).unwrap_or_else(|| "<no abstract>".to_string()),
         )
     } else {
@@ -162,6 +251,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if matches!(app.mode, Mode::ConfirmReplacePdf) {
         draw_confirm_replace_pdf(f, app);
+    }
+
+    // Drawn before the file browser: while adding files the popup stays
+    // visible underneath it.
+    if matches!(app.mode, Mode::Supplementary)
+        || (matches!(app.mode, Mode::FileBrowser) && app.supp_view.is_some())
+    {
+        draw_supp_popup(f, app);
     }
 
     if matches!(app.mode, Mode::FileBrowser) {
@@ -433,15 +530,37 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
         height: size.height * 3 / 4,
     };
 
+    // Keep the end of the path (the part that changes). Counted in chars, not
+    // bytes: byte slicing panics on non-ASCII paths. Budget: borders (2) plus
+    // " 📂 " and the trailing space (5 cells, the emoji is double-width).
     let dir_str   = fb.current_dir.to_string_lossy();
-    let max_title = area.width.saturating_sub(4) as usize;
-    let title = if dir_str.len() > max_title {
-        format!("…{}", &dir_str[dir_str.len() - max_title + 1..])
+    let max_title = area.width.saturating_sub(7) as usize;
+    let n_chars   = dir_str.chars().count();
+    let title = if n_chars > max_title {
+        let tail: String = dir_str.chars().skip(n_chars + 1 - max_title.max(1)).collect();
+        format!("…{tail}")
     } else {
         dir_str.to_string()
     };
 
-    let inner_height  = area.height.saturating_sub(4) as usize;
+    // Hints wrap to the window width; the file list gets what is left.
+    let count = fb.multi_selected.len();
+    let import_n = format!("Enter: import {count} selected");
+    let hint_items: Vec<&str> = if fb.filtering {
+        vec!["Enter: done typing", "↑/↓: move", "Esc: clear filter"]
+    } else if count > 0 {
+        vec!["Space: toggle", &import_n, "Esc: close"]
+    } else {
+        vec![
+            "Enter: open/select", "j/k: navigate", "Space: select", "/: filter",
+            "~: home", "D: Downloads", "Esc: close",
+        ]
+    };
+    let hint_lines = pack_hints(&hint_items, area.width.saturating_sub(2) as usize);
+    // Borders (2) + search line (1) + hints, but always leave one list row.
+    let hint_h = (hint_lines.len() as u16).min(area.height.saturating_sub(4));
+
+    let inner_height  = area.height.saturating_sub(3 + hint_h).max(1) as usize;
     let visible       = fb.visible_entries();
     let scroll_offset = if fb.selected >= inner_height { fb.selected - inner_height + 1 } else { 0 };
 
@@ -489,8 +608,8 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
     // Search bar
     let search_area = Rect {
         x: area.x + 1,
-        y: area.y + area.height - 3,
-        width: area.width - 2,
+        y: (area.y + area.height).saturating_sub(2 + hint_h),
+        width: area.width.saturating_sub(2),
         height: 1,
     };
     let search_text = if fb.filtering {
@@ -507,26 +626,86 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
     };
     f.render_widget(Paragraph::new(search_text).style(search_style), search_area);
 
-    // Hint bar
+    draw_hint_lines(f, area, &hint_lines, hint_h);
+}
+
+/// Render pre-packed hint lines on the bottom inner rows of a bordered `area`.
+fn draw_hint_lines(f: &mut Frame, area: Rect, lines: &[String], height: u16) {
+    if height == 0 {
+        return;
+    }
     let hint_area = Rect {
         x: area.x + 1,
-        y: area.y + area.height - 2,
-        width: area.width - 2,
-        height: 1,
+        y: (area.y + area.height).saturating_sub(1 + height),
+        width: area.width.saturating_sub(2),
+        height,
     };
     f.render_widget(Clear, hint_area);
-    let count = fb.multi_selected.len();
-    let hint: String = if fb.filtering {
-        " Enter: apply   Esc: cancel filter".to_string()
-    } else if count > 0 {
-        format!(" Space: toggle   Enter: import {} selected   Esc: close", count)
-    } else {
-        " Enter: open/select   j/k: navigate   Space: select   /: filter   Esc: close".to_string()
-    };
     f.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(Color::Green)),
+        Paragraph::new(lines.join("\n")).style(Style::default().fg(Color::Green)),
         hint_area,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: supplementary files popup
+// ---------------------------------------------------------------------------
+
+fn draw_supp_popup(f: &mut Frame, app: &App) {
+    let v = match &app.supp_view {
+        Some(v) => v,
+        None => return,
+    };
+
+    let size = f.size();
+    let area = Rect {
+        x: size.width / 6,
+        y: size.height / 8,
+        width: size.width * 2 / 3,
+        height: size.height * 3 / 4,
+    };
+
+    let hint_lines = pack_hints(
+        &["Enter: open", "j/k: navigate", "a: add files", "o: open folder", "y: copy path", "Esc: close"],
+        area.width.saturating_sub(2) as usize,
+    );
+    // Borders (2) + hints, but always leave one list row.
+    let hint_h = (hint_lines.len() as u16).min(area.height.saturating_sub(3));
+    let inner_height  = area.height.saturating_sub(2 + hint_h).max(1) as usize;
+    let scroll_offset = if v.selected >= inner_height { v.selected - inner_height + 1 } else { 0 };
+
+    let items: Vec<ListItem> = if v.files.is_empty() {
+        vec![ListItem::new("  No supplementary files yet — press a to add some")
+            .style(Style::default().add_modifier(Modifier::DIM))]
+    } else {
+        v.files
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(inner_height)
+            .map(|(i, path)| {
+                // Relative to the folder, so files from unpacked archives
+                // keep their subfolder as context.
+                let name = path.strip_prefix(&v.dir).unwrap_or(path).to_string_lossy().to_string();
+                let style = if i == v.selected {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(format!("  {name}")).style(style)
+            })
+            .collect()
+    };
+
+    let block = Block::default()
+        .title(format!(" Supplementary · {} ({}) ", v.key, v.files.len()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    f.render_widget(Clear, area);
+    f.render_widget(List::new(items).block(block), area);
+
+    draw_hint_lines(f, area, &hint_lines, hint_h);
 }
 
 // ---------------------------------------------------------------------------

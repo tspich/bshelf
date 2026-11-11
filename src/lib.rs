@@ -986,9 +986,82 @@ pub fn pdf_dest_for_entry(all_bib_path: &str, pdfs_dir: &str, key: &str) -> Resu
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("No DOI found for '{}'", key))?;
 
-    let filename = normalize_doi(&doi).replace('/', "-");
+    Ok(pdf_path_for_doi(std::path::Path::new(pdfs_dir), &doi))
+}
 
-    Ok(PathBuf::from(pdfs_dir).join(format!("{filename}.pdf")))
+/// `{pdfs_dir}/{stem}.pdf` — the PDF path for a DOI already in hand, without
+/// re-reading `all.bib`. `pdf_dest_for_entry` and the TUI both go through it.
+pub fn pdf_path_for_doi(pdfs_dir: &std::path::Path, doi: &str) -> PathBuf {
+    pdfs_dir.join(format!("{}.pdf", pdf_stem_for_doi(doi)))
+}
+
+/// The single naming scheme for everything stored under `pdfs_dir` for an
+/// entry: `10.1038/foo` → `10.1038-foo`. The PDF is `{stem}.pdf` and the
+/// supplementary folder is `{stem}/`, so the two always sort side by side.
+pub fn pdf_stem_for_doi(doi: &str) -> String {
+    normalize_doi(doi).replace('/', "-")
+}
+
+/// Folder holding an entry's supplementary files: `{pdfs_dir}/{stem}/`.
+/// Pure path computation — the folder may not exist yet.
+pub fn supp_dir_for_doi(pdfs_dir: &std::path::Path, doi: &str) -> Result<PathBuf> {
+    let stem = pdf_stem_for_doi(doi);
+    if stem.is_empty() {
+        anyhow::bail!("Entry has no DOI, so it has no supplementary folder");
+    }
+    Ok(pdfs_dir.join(stem))
+}
+
+/// Every regular file under `dir`, recursively (SI archives often unpack
+/// into subfolders), sorted case-insensitively by relative path. Hidden
+/// files are skipped. A missing folder is simply an empty list.
+pub fn list_supp_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.filter_map(|e| e.ok()) {
+            if e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = e.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    files.sort_by_key(|p| p.strip_prefix(dir).unwrap_or(p).to_string_lossy().to_lowercase());
+    files
+}
+
+/// True when the supplementary folder exists and holds at least one
+/// non-hidden entry. Cheap enough to call per visible row on every frame.
+pub fn has_supp_files(dir: &std::path::Path) -> bool {
+    fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok()).any(|e| !e.file_name().to_string_lossy().starts_with('.')))
+        .unwrap_or(false)
+}
+
+/// Copy `sources` into `dir` (created if needed). Files whose name already
+/// exists there are left untouched and returned as skipped, so adding the
+/// same download twice never clobbers anything. Returns `(copied, skipped)`.
+pub fn add_supp_files(dir: &std::path::Path, sources: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    fs::create_dir_all(dir)?;
+    let (mut copied, mut skipped) = (Vec::new(), Vec::new());
+    for src in sources {
+        let name = src.file_name()
+            .ok_or_else(|| anyhow::anyhow!("Not a file: {}", src.display()))?;
+        let dest = dir.join(name);
+        if dest.exists() {
+            skipped.push(src.clone());
+            continue;
+        }
+        fs::copy(src, &dest)?;
+        copied.push(dest);
+    }
+    Ok((copied, skipped))
 }
 
 pub fn link_pdf_to_entry(all_bib_path: &str, pdfs_dir: &str, key: &str, pdf_path: &str, overwrite: bool) -> Result<()> {
@@ -1011,6 +1084,12 @@ pub struct Config {
     /// PDF lookup is skipped entirely rather than sent with a placeholder.
     #[serde(default)]
     pub unpaywall_email: Option<String>,
+    /// Program used by `o` in the supplementary popup to open the folder,
+    /// e.g. "yazi", "ranger", "lf", "nnn" or "vifm". It gets the terminal
+    /// while it runs. `{}` in the string is replaced by the folder path;
+    /// otherwise the path is appended. Unset → `xdg-open`.
+    #[serde(default)]
+    pub file_manager: Option<String>,
 }
 
 // pub fn load_config() -> Config {
