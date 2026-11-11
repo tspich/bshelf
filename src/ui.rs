@@ -12,6 +12,7 @@ use bshelf::{
     date_to_year_string,
     has_supp_files,
     list_supp_files,
+    pdf_path_for_doi,
     publisher_string,
     supp_dir_for_doi,
 };
@@ -86,13 +87,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Style::default()
             };
             // Only visible rows get here, so this is a handful of
-            // read_dir calls per frame.
-            let has_si = supp_dir_for_doi(&app.config.pdfs_dir, &r.doi().ok().unwrap_or_default())
+            // stat/read_dir calls per frame.
+            let doi = r.doi().ok().unwrap_or_default();
+            let has_pdf = !doi.is_empty() && pdf_path_for_doi(&app.config.pdfs_dir, &doi).exists();
+            let has_si = supp_dir_for_doi(&app.config.pdfs_dir, &doi)
                 .map(|d| has_supp_files(&d))
                 .unwrap_or(false);
+            // DIM fades the row's own colour instead of picking a fixed grey:
+            // "dark gray" is the background colour in many dark themes.
+            let marker = style.add_modifier(Modifier::DIM);
             let mut spans = vec![Span::styled(key, style)];
+            if has_pdf {
+                spans.push(Span::styled(" [PDF]", marker));
+            }
             if has_si {
-                spans.push(Span::styled(" [SI]", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(" [SI]", marker));
             }
             ListItem::new(Line::from(spans))
         })
@@ -105,7 +114,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // ── Right panel: details ────────────────────────────────────────────────
     let details = if !refs_to_show.is_empty() && app.selected_reference < refs_to_show.len() {
         let r = &refs_to_show[app.selected_reference];
-        let supp_count = supp_dir_for_doi(&app.config.pdfs_dir, &r.doi().ok().unwrap_or_default())
+        let doi = r.doi().ok().unwrap_or_default();
+        let pdf_line = if !doi.is_empty() && pdf_path_for_doi(&app.config.pdfs_dir, &doi).exists() {
+            "available (Enter to open)"
+        } else {
+            "none"
+        };
+        let supp_count = supp_dir_for_doi(&app.config.pdfs_dir, &doi)
             .map(|d| list_supp_files(&d).len())
             .unwrap_or(0);
         let supp_line = match supp_count {
@@ -114,13 +129,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             n => format!("{n} files (S to show)"),
         };
         format!(
-            "Title:\n{}\nAuthors:\n{}\nYear: {}\nJournal: {}\nDOI: {}\nPublisher: {}\nSupplementary: {}\nAbstract:\n {}",
+            "Title:\n{}\nAuthors:\n{}\nYear: {}\nJournal: {}\nDOI: {}\nPublisher: {}\nPDF: {}\nSupplementary: {}\nAbstract:\n {}",
             r.title().ok().map(chunks_to_string).unwrap_or_else(|| "<no title>".to_string()),
             r.author().ok().map(authors_to_string).unwrap_or_else(|| "no authors".to_string()),
             r.date().ok().and_then(date_to_year_string).unwrap_or_else(|| "<no year>".to_string()),
             r.journal().ok().map(chunks_to_string).unwrap_or_else(|| "<no journal>".to_string()),
             r.url().ok().as_deref().unwrap_or(""),
             r.publisher().ok().map(publisher_string).unwrap_or_else(|| "<no issn>".to_string()),
+            pdf_line,
             supp_line,
             r.abstract_().ok().map(chunks_to_string).unwrap_or_else(|| "<no abstract>".to_string()),
         )
@@ -550,7 +566,7 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
     } else if count > 0 {
         format!(" Space: toggle   Enter: import {} selected   Esc: close", count)
     } else {
-        " Enter: open/select   j/k: navigate   Space: select   /: filter   Esc: close".to_string()
+        " Enter: open/select   j/k: navigate   Space: select   /: filter   ~: home   D: Downloads   Esc: close".to_string()
     };
     f.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::Green)),
@@ -582,7 +598,7 @@ fn draw_supp_popup(f: &mut Frame, app: &App) {
 
     let items: Vec<ListItem> = if v.files.is_empty() {
         vec![ListItem::new("  No supplementary files yet — press a to add some")
-            .style(Style::default().fg(Color::DarkGray))]
+            .style(Style::default().add_modifier(Modifier::DIM))]
     } else {
         v.files
             .iter()

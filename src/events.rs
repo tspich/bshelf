@@ -18,7 +18,7 @@ use bshelf::{
     link_pdf_to_entry,
     parse_doi_list,
     pdf_dest_for_entry,
-    pdf_stem_for_doi,
+    pdf_path_for_doi,
     refetch_metadata,
     remove_from_project,
     rename_project,
@@ -322,8 +322,7 @@ pub fn handle_key(
                 app.references.clone()
             };
             if let Some(r) = active_refs.get(app.selected_reference) {
-                let safe_name = pdf_stem_for_doi(r.doi().ok().as_deref().unwrap_or(""));
-                let pdf_path = app.config.pdfs_dir.join(format!("{safe_name}.pdf"));
+                let pdf_path = pdf_path_for_doi(&app.config.pdfs_dir, r.doi().ok().as_deref().unwrap_or(""));
                 if pdf_path.exists() {
                     open_detached(app, &pdf_path);
                 } else {
@@ -760,6 +759,26 @@ pub fn handle_key(
                 if fb.selected + 1 < count { fb.selected += 1; }
             }
         }
+        // Quick jumps: `~` home, `D` the XDG downloads folder.
+        KeyCode::Char(c @ ('~' | 'D'))
+            if matches!(app.mode, Mode::FileBrowser)
+                && app.file_browser.as_ref().is_some_and(|fb| !fb.filtering) =>
+        {
+            let target = if c == '~' {
+                dirs::home_dir()
+            } else {
+                dirs::download_dir().or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+            };
+            match target.filter(|d| d.is_dir()) {
+                Some(dir) => {
+                    if let Some(fb) = &mut app.file_browser {
+                        fb.current_dir = dir;
+                        fb.refresh();
+                    }
+                }
+                None => app.show_alert("Folder not found"),
+            }
+        }
         KeyCode::Char(c) if matches!(app.mode, Mode::FileBrowser) => {
             if let Some(fb) = &mut app.file_browser {
                 if fb.filtering {
@@ -899,10 +918,14 @@ pub fn handle_key(
         }
         KeyCode::Char('o') if matches!(app.mode, Mode::Supplementary) => {
             if let Some(dir) = app.supp_view.as_ref().map(|v| v.dir.clone()) {
-                if dir.is_dir() {
-                    open_detached(app, &dir);
+                // Create it on demand, so the file manager can be used to
+                // drop the downloaded files in.
+                if let Err(e) = fs::create_dir_all(&dir) {
+                    app.show_alert(&format!("Could not create {}: {e}", dir.display()));
+                } else if let Some(fm) = app.config.file_manager.clone() {
+                    run_file_manager(app, &fm, &dir, terminal);
                 } else {
-                    app.show_alert("No supplementary folder yet — press a to add files");
+                    open_detached(app, &dir);
                 }
             }
         }
@@ -1217,6 +1240,40 @@ fn handle_file_browser_enter(
             _ => {}
         }
     }
+}
+
+/// Run the configured file manager on `dir` with the terminal handed over.
+/// `{}` in `cmd` is replaced by the path; otherwise the path is appended.
+fn run_file_manager(
+    app: &mut App,
+    cmd: &str,
+    dir: &std::path::Path,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    let dir_str = dir.to_string_lossy().to_string();
+    let mut parts: Vec<String> = cmd.split_whitespace().map(str::to_string).collect();
+    if parts.is_empty() {
+        app.show_alert("file_manager in config.toml is empty");
+        return;
+    }
+    if parts.iter().any(|p| p.contains("{}")) {
+        for p in &mut parts { *p = p.replace("{}", &dir_str); }
+    } else {
+        parts.push(dir_str);
+    }
+
+    app.suspend_tui().ok();
+    let status = std::process::Command::new(&parts[0]).args(&parts[1..]).status();
+    app.resume_tui().ok();
+    terminal.clear().ok();
+
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s)  => app.show_alert(&format!("{} exited with {}", parts[0], s)),
+        Err(e) => app.show_alert(&format!("Failed to run {}: {}", parts[0], e)),
+    }
+    // Files may have been added or removed in there.
+    if let Some(v) = &mut app.supp_view { v.refresh(); }
 }
 
 /// Copy `sources` into the open supplementary popup's folder and return to it.

@@ -986,7 +986,13 @@ pub fn pdf_dest_for_entry(all_bib_path: &str, pdfs_dir: &str, key: &str) -> Resu
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("No DOI found for '{}'", key))?;
 
-    Ok(PathBuf::from(pdfs_dir).join(format!("{}.pdf", pdf_stem_for_doi(&doi))))
+    Ok(pdf_path_for_doi(std::path::Path::new(pdfs_dir), &doi))
+}
+
+/// `{pdfs_dir}/{stem}.pdf` — the PDF path for a DOI already in hand, without
+/// re-reading `all.bib`. `pdf_dest_for_entry` and the TUI both go through it.
+pub fn pdf_path_for_doi(pdfs_dir: &std::path::Path, doi: &str) -> PathBuf {
+    pdfs_dir.join(format!("{}.pdf", pdf_stem_for_doi(doi)))
 }
 
 /// The single naming scheme for everything stored under `pdfs_dir` for an
@@ -1078,6 +1084,12 @@ pub struct Config {
     /// PDF lookup is skipped entirely rather than sent with a placeholder.
     #[serde(default)]
     pub unpaywall_email: Option<String>,
+    /// Program used by `o` in the supplementary popup to open the folder,
+    /// e.g. "yazi", "ranger", "lf", "nnn" or "vifm". It gets the terminal
+    /// while it runs. `{}` in the string is replaced by the folder path;
+    /// otherwise the path is appended. Unset → `xdg-open`.
+    #[serde(default)]
+    pub file_manager: Option<String>,
 }
 
 // pub fn load_config() -> Config {
