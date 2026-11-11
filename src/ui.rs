@@ -20,6 +20,48 @@ use bshelf::{
 use crate::app::{App, ImportKind, Mode, mode_name};
 use crate::keybindings::{help_lines, mode_color};
 
+/// Nerd Font "file-pdf" glyph (U+F1C1), the one yazi shows for PDFs.
+/// Needs a Nerd Font in the terminal, as yazi does.
+const PDF_ICON: &str = "\u{f1c1}";
+const SI_MARK: &str = "[SI]";
+
+/// Cut `s` to at most `max` chars, ending in "…" when shortened.
+fn truncate_to(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        let mut t: String = s.chars().take(max - 1).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// Greedily pack hint items onto lines no wider than `width`, separated by
+/// three spaces, so a narrow window wraps the hints instead of cutting them.
+fn pack_hints(items: &[&str], width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for item in items {
+        let candidate = if cur.is_empty() {
+            format!(" {item}")
+        } else {
+            format!("{cur}   {item}")
+        };
+        if candidate.chars().count() > width && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+            cur = format!(" {item}");
+        } else {
+            cur = candidate;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 /// Draw the entire TUI for one frame.
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Vertical layout: panels | search box | status bar
@@ -74,6 +116,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.references.clone()
     };
 
+    let ref_inner_w = panels[1].width.saturating_sub(2) as usize;
     let visible_refs: Vec<ListItem> = refs_to_show
         .iter()
         .enumerate()
@@ -93,17 +136,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let has_si = supp_dir_for_doi(&app.config.pdfs_dir, &doi)
                 .map(|d| has_supp_files(&d))
                 .unwrap_or(false);
+            // Fixed right-hand columns, so markers line up row to row:
+            // "[SI] " then the PDF icon. Key is truncated to make room.
+            let markers_w = SI_MARK.len() + 1 + 1;
+            let key_room = ref_inner_w.saturating_sub(markers_w + 1);
+            let key = truncate_to(&key, key_room);
+            let pad = ref_inner_w.saturating_sub(key.chars().count() + markers_w);
             // DIM fades the row's own colour instead of picking a fixed grey:
             // "dark gray" is the background colour in many dark themes.
-            let marker = style.add_modifier(Modifier::DIM);
-            let mut spans = vec![Span::styled(key, style)];
-            if has_pdf {
-                spans.push(Span::styled(" [PDF]", marker));
-            }
-            if has_si {
-                spans.push(Span::styled(" [SI]", marker));
-            }
-            ListItem::new(Line::from(spans))
+            let si_style = style.add_modifier(Modifier::DIM);
+            ListItem::new(Line::from(vec![
+                Span::styled(key, style),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(if has_si { SI_MARK } else { "    " }, si_style),
+                Span::raw(" "),
+                if has_pdf {
+                    Span::styled(PDF_ICON, Style::default().fg(Color::Red))
+                } else {
+                    Span::raw(" ")
+                },
+            ]))
         })
         .collect();
 
@@ -478,15 +530,37 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
         height: size.height * 3 / 4,
     };
 
+    // Keep the end of the path (the part that changes). Counted in chars, not
+    // bytes: byte slicing panics on non-ASCII paths. Budget: borders (2) plus
+    // " 📂 " and the trailing space (5 cells, the emoji is double-width).
     let dir_str   = fb.current_dir.to_string_lossy();
-    let max_title = area.width.saturating_sub(4) as usize;
-    let title = if dir_str.len() > max_title {
-        format!("…{}", &dir_str[dir_str.len() - max_title + 1..])
+    let max_title = area.width.saturating_sub(7) as usize;
+    let n_chars   = dir_str.chars().count();
+    let title = if n_chars > max_title {
+        let tail: String = dir_str.chars().skip(n_chars + 1 - max_title.max(1)).collect();
+        format!("…{tail}")
     } else {
         dir_str.to_string()
     };
 
-    let inner_height  = area.height.saturating_sub(4) as usize;
+    // Hints wrap to the window width; the file list gets what is left.
+    let count = fb.multi_selected.len();
+    let import_n = format!("Enter: import {count} selected");
+    let hint_items: Vec<&str> = if fb.filtering {
+        vec!["Enter: apply", "Esc: cancel filter"]
+    } else if count > 0 {
+        vec!["Space: toggle", &import_n, "Esc: close"]
+    } else {
+        vec![
+            "Enter: open/select", "j/k: navigate", "Space: select", "/: filter",
+            "~: home", "D: Downloads", "Esc: close",
+        ]
+    };
+    let hint_lines = pack_hints(&hint_items, area.width.saturating_sub(2) as usize);
+    // Borders (2) + search line (1) + hints, but always leave one list row.
+    let hint_h = (hint_lines.len() as u16).min(area.height.saturating_sub(4));
+
+    let inner_height  = area.height.saturating_sub(3 + hint_h).max(1) as usize;
     let visible       = fb.visible_entries();
     let scroll_offset = if fb.selected >= inner_height { fb.selected - inner_height + 1 } else { 0 };
 
@@ -534,8 +608,8 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
     // Search bar
     let search_area = Rect {
         x: area.x + 1,
-        y: area.y + area.height - 3,
-        width: area.width - 2,
+        y: (area.y + area.height).saturating_sub(2 + hint_h),
+        width: area.width.saturating_sub(2),
         height: 1,
     };
     let search_text = if fb.filtering {
@@ -552,24 +626,23 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
     };
     f.render_widget(Paragraph::new(search_text).style(search_style), search_area);
 
-    // Hint bar
+    draw_hint_lines(f, area, &hint_lines, hint_h);
+}
+
+/// Render pre-packed hint lines on the bottom inner rows of a bordered `area`.
+fn draw_hint_lines(f: &mut Frame, area: Rect, lines: &[String], height: u16) {
+    if height == 0 {
+        return;
+    }
     let hint_area = Rect {
         x: area.x + 1,
-        y: area.y + area.height - 2,
-        width: area.width - 2,
-        height: 1,
+        y: (area.y + area.height).saturating_sub(1 + height),
+        width: area.width.saturating_sub(2),
+        height,
     };
     f.render_widget(Clear, hint_area);
-    let count = fb.multi_selected.len();
-    let hint: String = if fb.filtering {
-        " Enter: apply   Esc: cancel filter".to_string()
-    } else if count > 0 {
-        format!(" Space: toggle   Enter: import {} selected   Esc: close", count)
-    } else {
-        " Enter: open/select   j/k: navigate   Space: select   /: filter   ~: home   D: Downloads   Esc: close".to_string()
-    };
     f.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(Color::Green)),
+        Paragraph::new(lines.join("\n")).style(Style::default().fg(Color::Green)),
         hint_area,
     );
 }
@@ -592,8 +665,13 @@ fn draw_supp_popup(f: &mut Frame, app: &App) {
         height: size.height * 3 / 4,
     };
 
-    // Borders (2) + hint line (1).
-    let inner_height  = area.height.saturating_sub(3) as usize;
+    let hint_lines = pack_hints(
+        &["Enter: open", "j/k: navigate", "a: add files", "o: open folder", "y: copy path", "Esc: close"],
+        area.width.saturating_sub(2) as usize,
+    );
+    // Borders (2) + hints, but always leave one list row.
+    let hint_h = (hint_lines.len() as u16).min(area.height.saturating_sub(3));
+    let inner_height  = area.height.saturating_sub(2 + hint_h).max(1) as usize;
     let scroll_offset = if v.selected >= inner_height { v.selected - inner_height + 1 } else { 0 };
 
     let items: Vec<ListItem> = if v.files.is_empty() {
@@ -627,17 +705,7 @@ fn draw_supp_popup(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     f.render_widget(List::new(items).block(block), area);
 
-    let hint_area = Rect {
-        x: area.x + 1,
-        y: area.y + area.height.saturating_sub(2),
-        width: area.width.saturating_sub(2),
-        height: 1,
-    };
-    f.render_widget(
-        Paragraph::new(" Enter: open   j/k: navigate   a: add files   o: open folder   y: copy path   Esc: close")
-            .style(Style::default().fg(Color::Green)),
-        hint_area,
-    );
+    draw_hint_lines(f, area, &hint_lines, hint_h);
 }
 
 // ---------------------------------------------------------------------------
