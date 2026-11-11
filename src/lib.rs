@@ -1036,6 +1036,48 @@ pub fn list_supp_files(dir: &std::path::Path) -> Vec<PathBuf> {
     files
 }
 
+/// Build the argv for the configured `file_manager`.
+///
+/// `{}` is replaced by `dir` (appended at the end when absent) and
+/// `{chooser}` by `chooser`, the file the program writes picked paths to.
+/// A bare program name gets its picker flag added automatically for the
+/// common terminal file managers. Returns the argv and whether picking is
+/// supported, i.e. whether the chooser file will be written.
+pub fn file_manager_argv(
+    cmd: &str,
+    dir: &std::path::Path,
+    chooser: &std::path::Path,
+) -> (Vec<String>, bool) {
+    let mut parts: Vec<String> = cmd.split_whitespace().map(str::to_string).collect();
+    if parts.len() == 1 {
+        let prog = std::path::Path::new(&parts[0])
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let preset: &[&str] = match prog.as_str() {
+            "yazi"   => &["--chooser-file={chooser}"],
+            "ranger" => &["--choosefiles={chooser}"],
+            "lf"     => &["-selection-path={chooser}"],
+            "nnn"    => &["-p", "{chooser}"],
+            "vifm"   => &["--choose-files", "{chooser}"],
+            _        => &[],
+        };
+        parts.extend(preset.iter().map(|s| s.to_string()));
+    }
+
+    let dir_s = dir.to_string_lossy();
+    let chooser_s = chooser.to_string_lossy();
+    let picks = parts.iter().any(|p| p.contains("{chooser}"));
+    let has_dir = parts.iter().any(|p| p.replace("{chooser}", "").contains("{}"));
+    for p in &mut parts {
+        *p = p.replace("{chooser}", &chooser_s).replace("{}", &dir_s);
+    }
+    if !has_dir {
+        parts.push(dir_s.to_string());
+    }
+    (parts, picks)
+}
+
 /// True when the supplementary folder exists and holds at least one
 /// non-hidden entry. Cheap enough to call per visible row on every frame.
 pub fn has_supp_files(dir: &std::path::Path) -> bool {
@@ -1084,10 +1126,11 @@ pub struct Config {
     /// PDF lookup is skipped entirely rather than sent with a placeholder.
     #[serde(default)]
     pub unpaywall_email: Option<String>,
-    /// Program used by `o` in the supplementary popup to open the folder,
-    /// e.g. "yazi", "ranger", "lf", "nnn" or "vifm". It gets the terminal
-    /// while it runs. `{}` in the string is replaced by the folder path;
-    /// otherwise the path is appended. Unset → `xdg-open`.
+    /// Terminal file manager for the supplementary popup, e.g. "yazi",
+    /// "ranger", "lf", "nnn" or "vifm": `o` browses the folder with it and
+    /// `a` uses it to pick files to add. Files picked in it (Enter) come
+    /// back to bshelf. See `file_manager_argv` for `{}` / `{chooser}`.
+    /// Unset → `o` uses `xdg-open`, `a` the built-in browser.
     #[serde(default)]
     pub file_manager: Option<String>,
 }

@@ -9,6 +9,7 @@ use bshelf::{
     add_reference,
     add_supp_files,
     add_to_project,
+    file_manager_argv,
     delete_project,
     export_project_bib,
     entry_to_bibtex,
@@ -940,7 +941,11 @@ pub fn handle_key(
                 if let Err(e) = fs::create_dir_all(&dir) {
                     app.show_alert(&format!("Could not create {}: {e}", dir.display()));
                 } else if let Some(fm) = app.config.file_manager.clone() {
-                    run_file_manager(app, &fm, &dir, terminal);
+                    // Files picked in the file manager (Enter) are opened
+                    // once it exits.
+                    for path in run_file_manager(app, &fm, &dir, terminal) {
+                        open_detached(app, &path);
+                    }
                 } else {
                     open_detached(app, &dir);
                 }
@@ -959,8 +964,19 @@ pub fn handle_key(
         KeyCode::Char('a') if matches!(app.mode, Mode::Supplementary) => {
             let start = std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            app.file_browser = Some(FileBrowser::new(start, FileBrowserMode::Supplementary));
-            app.mode = Mode::FileBrowser;
+            if file_manager_can_pick(app) {
+                // Pick the files to add in the configured file manager.
+                let fm = app.config.file_manager.clone().unwrap_or_default();
+                let picked = run_file_manager(app, &fm, &start, terminal);
+                if picked.is_empty() {
+                    app.show_alert("No files picked");
+                } else {
+                    add_supplementary(app, picked);
+                }
+            } else {
+                app.file_browser = Some(FileBrowser::new(start, FileBrowserMode::Supplementary));
+                app.mode = Mode::FileBrowser;
+            }
         }
 
         // ── Show logs ─────────────────────────────────────
@@ -1259,38 +1275,61 @@ fn handle_file_browser_enter(
     }
 }
 
-/// Run the configured file manager on `dir` with the terminal handed over.
-/// `{}` in `cmd` is replaced by the path; otherwise the path is appended.
+/// Whether the configured `file_manager` can hand picked files back.
+fn file_manager_can_pick(app: &App) -> bool {
+    app.config.file_manager.as_deref().is_some_and(|cmd| {
+        file_manager_argv(cmd, std::path::Path::new("."), std::path::Path::new("x")).1
+    })
+}
+
+/// Run the configured file manager on `dir` with the terminal handed over,
+/// and return the regular files the user picked in it (empty if none, or
+/// if the program has no picker mode). The list is also refreshed, since
+/// files may have been added or removed in there.
 fn run_file_manager(
     app: &mut App,
     cmd: &str,
     dir: &std::path::Path,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) {
-    let dir_str = dir.to_string_lossy().to_string();
-    let mut parts: Vec<String> = cmd.split_whitespace().map(str::to_string).collect();
-    if parts.is_empty() {
+) -> Vec<std::path::PathBuf> {
+    let chooser = std::env::temp_dir().join(format!("bshelf-chooser-{}", std::process::id()));
+    let _ = fs::remove_file(&chooser);
+    let (argv, picks) = file_manager_argv(cmd, dir, &chooser);
+    if argv.is_empty() || argv[0].is_empty() {
         app.show_alert("file_manager in config.toml is empty");
-        return;
-    }
-    if parts.iter().any(|p| p.contains("{}")) {
-        for p in &mut parts { *p = p.replace("{}", &dir_str); }
-    } else {
-        parts.push(dir_str);
+        return Vec::new();
     }
 
+    app.log(&format!("Running file manager: {}", argv.join(" ")));
     app.suspend_tui().ok();
-    let status = std::process::Command::new(&parts[0]).args(&parts[1..]).status();
+    let status = std::process::Command::new(&argv[0]).args(&argv[1..]).status();
     app.resume_tui().ok();
     terminal.clear().ok();
 
-    match status {
+    match &status {
         Ok(s) if s.success() => {}
-        Ok(s)  => app.show_alert(&format!("{} exited with {}", parts[0], s)),
-        Err(e) => app.show_alert(&format!("Failed to run {}: {}", parts[0], e)),
+        Ok(s)  => app.show_alert(&format!("{} exited with {}", argv[0], s)),
+        Err(e) => {
+            app.log(&format!("  failed: {}", e));
+            app.show_alert(&format!("Failed to run {}: {}", argv[0], e));
+        }
     }
-    // Files may have been added or removed in there.
     if let Some(v) = &mut app.supp_view { v.refresh(); }
+
+    if !picks {
+        return Vec::new();
+    }
+    // One path per line. Directories are dropped: only files can be
+    // opened or added.
+    let picked: Vec<std::path::PathBuf> = fs::read_to_string(&chooser)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect();
+    let _ = fs::remove_file(&chooser);
+    picked
 }
 
 /// Copy `sources` into the open supplementary popup's folder and return to it.
