@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect, Alignment},
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Clear, Wrap},
 };
 
@@ -10,7 +10,10 @@ use bshelf::{
     authors_to_string,
     chunks_to_string,
     date_to_year_string,
+    has_supp_files,
+    list_supp_files,
     publisher_string,
+    supp_dir_for_doi,
 };
 
 use crate::app::{App, ImportKind, Mode, mode_name};
@@ -82,7 +85,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
-            ListItem::new(Span::styled(key, style))
+            // Only visible rows get here, so this is a handful of
+            // read_dir calls per frame.
+            let has_si = supp_dir_for_doi(&app.config.pdfs_dir, &r.doi().ok().unwrap_or_default())
+                .map(|d| has_supp_files(&d))
+                .unwrap_or(false);
+            let mut spans = vec![Span::styled(key, style)];
+            if has_si {
+                spans.push(Span::styled(" [SI]", Style::default().fg(Color::DarkGray)));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -93,14 +105,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // ── Right panel: details ────────────────────────────────────────────────
     let details = if !refs_to_show.is_empty() && app.selected_reference < refs_to_show.len() {
         let r = &refs_to_show[app.selected_reference];
+        let supp_count = supp_dir_for_doi(&app.config.pdfs_dir, &r.doi().ok().unwrap_or_default())
+            .map(|d| list_supp_files(&d).len())
+            .unwrap_or(0);
+        let supp_line = match supp_count {
+            0 => "none".to_string(),
+            1 => "1 file (S to show)".to_string(),
+            n => format!("{n} files (S to show)"),
+        };
         format!(
-            "Title:\n{}\nAuthors:\n{}\nYear: {}\nJournal: {}\nDOI: {}\nPublisher: {}\nAbstract:\n {}",
+            "Title:\n{}\nAuthors:\n{}\nYear: {}\nJournal: {}\nDOI: {}\nPublisher: {}\nSupplementary: {}\nAbstract:\n {}",
             r.title().ok().map(chunks_to_string).unwrap_or_else(|| "<no title>".to_string()),
             r.author().ok().map(authors_to_string).unwrap_or_else(|| "no authors".to_string()),
             r.date().ok().and_then(date_to_year_string).unwrap_or_else(|| "<no year>".to_string()),
             r.journal().ok().map(chunks_to_string).unwrap_or_else(|| "<no journal>".to_string()),
             r.url().ok().as_deref().unwrap_or(""),
             r.publisher().ok().map(publisher_string).unwrap_or_else(|| "<no issn>".to_string()),
+            supp_line,
             r.abstract_().ok().map(chunks_to_string).unwrap_or_else(|| "<no abstract>".to_string()),
         )
     } else {
@@ -162,6 +183,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if matches!(app.mode, Mode::ConfirmReplacePdf) {
         draw_confirm_replace_pdf(f, app);
+    }
+
+    // Drawn before the file browser: while adding files the popup stays
+    // visible underneath it.
+    if matches!(app.mode, Mode::Supplementary)
+        || (matches!(app.mode, Mode::FileBrowser) && app.supp_view.is_some())
+    {
+        draw_supp_popup(f, app);
     }
 
     if matches!(app.mode, Mode::FileBrowser) {
@@ -525,6 +554,72 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
     };
     f.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::Green)),
+        hint_area,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: supplementary files popup
+// ---------------------------------------------------------------------------
+
+fn draw_supp_popup(f: &mut Frame, app: &App) {
+    let v = match &app.supp_view {
+        Some(v) => v,
+        None => return,
+    };
+
+    let size = f.size();
+    let area = Rect {
+        x: size.width / 6,
+        y: size.height / 8,
+        width: size.width * 2 / 3,
+        height: size.height * 3 / 4,
+    };
+
+    // Borders (2) + hint line (1).
+    let inner_height  = area.height.saturating_sub(3) as usize;
+    let scroll_offset = if v.selected >= inner_height { v.selected - inner_height + 1 } else { 0 };
+
+    let items: Vec<ListItem> = if v.files.is_empty() {
+        vec![ListItem::new("  No supplementary files yet — press a to add some")
+            .style(Style::default().fg(Color::DarkGray))]
+    } else {
+        v.files
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(inner_height)
+            .map(|(i, path)| {
+                // Relative to the folder, so files from unpacked archives
+                // keep their subfolder as context.
+                let name = path.strip_prefix(&v.dir).unwrap_or(path).to_string_lossy().to_string();
+                let style = if i == v.selected {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(format!("  {name}")).style(style)
+            })
+            .collect()
+    };
+
+    let block = Block::default()
+        .title(format!(" Supplementary · {} ({}) ", v.key, v.files.len()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    f.render_widget(Clear, area);
+    f.render_widget(List::new(items).block(block), area);
+
+    let hint_area = Rect {
+        x: area.x + 1,
+        y: area.y + area.height.saturating_sub(2),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(" Enter: open   j/k: navigate   a: add files   o: open folder   y: copy path   Esc: close")
+            .style(Style::default().fg(Color::Green)),
         hint_area,
     );
 }

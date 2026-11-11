@@ -7,6 +7,7 @@ use std::{fs, io};
 
 use bshelf::{
     add_reference,
+    add_supp_files,
     add_to_project,
     delete_project,
     export_project_bib,
@@ -15,15 +16,39 @@ use bshelf::{
     find_existing_by_doi,
     import_bib_file,
     link_pdf_to_entry,
-    normalize_doi,
     parse_doi_list,
     pdf_dest_for_entry,
+    pdf_stem_for_doi,
     refetch_metadata,
     remove_from_project,
-    rename_project
+    rename_project,
+    supp_dir_for_doi,
 };
 
-use crate::app::{App, FileBrowser, FileBrowserMode, ImportKind, Mode};
+use crate::app::{App, FileBrowser, FileBrowserMode, ImportKind, Mode, SuppView};
+
+/// Hand `path` to `xdg-open` without tying it to our terminal.
+///
+/// The viewer keeps running alongside the TUI, so it must not share our
+/// terminal: anything it writes (Poppler's "unexpected tz val" and friends)
+/// would land on top of the rendered frame. Null fds are inherited by
+/// whatever xdg-open execs.
+fn open_detached(app: &mut App, path: &std::path::Path) {
+    match std::process::Command::new("xdg-open")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        // xdg-open exits as soon as it has handed off to the viewer.
+        // Reap it so a long session does not pile up zombies.
+        Ok(mut child) => {
+            std::thread::spawn(move || { let _ = child.wait(); });
+        }
+        Err(err) => app.show_alert(&format!("Failed to open {}: {}", path.display(), err)),
+    }
+}
 
 // TODO: Should be impossible to create a 'all' project
 
@@ -297,28 +322,10 @@ pub fn handle_key(
                 app.references.clone()
             };
             if let Some(r) = active_refs.get(app.selected_reference) {
-                let safe_name = normalize_doi(r.doi().ok().as_deref().unwrap_or(""))
-                    .replace('/', "-");
+                let safe_name = pdf_stem_for_doi(r.doi().ok().as_deref().unwrap_or(""));
                 let pdf_path = app.config.pdfs_dir.join(format!("{safe_name}.pdf"));
                 if pdf_path.exists() {
-                    // The viewer keeps running alongside the TUI, so it must not
-                    // share our terminal: anything it writes (Poppler's "unexpected
-                    // tz val" and friends) would land on top of the rendered frame.
-                    // Null fds are inherited by whatever xdg-open execs.
-                    match std::process::Command::new("xdg-open")
-                        .arg(&pdf_path)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                    {
-                        // xdg-open exits as soon as it has handed off to the viewer.
-                        // Reap it so a long session does not pile up zombies.
-                        Ok(mut child) => {
-                            std::thread::spawn(move || { let _ = child.wait(); });
-                        }
-                        Err(err) => app.show_alert(&format!("Failed to open PDF: {}", err)),
-                    }
+                    open_detached(app, &pdf_path);
                 } else {
                     app.show_alert(&format!("PDF not found: {}", pdf_path.display()));
                 }
@@ -717,9 +724,13 @@ pub fn handle_key(
                     fb.filter.clear();
                     fb.selected = 0;
                 } else {
+                    // Adding supplementary files was started from that
+                    // popup, so cancelling goes back to it.
+                    let back_to_supp = fb.browser_mode == FileBrowserMode::Supplementary
+                        && app.supp_view.is_some();
                     app.file_browser = None;
                     app.pending_link_key = None;
-                    app.mode = Mode::Normal;
+                    app.mode = if back_to_supp { Mode::Supplementary } else { Mode::Normal };
                 }
             }
         }
@@ -836,6 +847,82 @@ pub fn handle_key(
             }
         }
 
+        // ── Supplementary files ───────────────────────────────────────────────
+        KeyCode::Char('S') if matches!(app.mode, Mode::Normal) => {
+            let active_refs = if !app.search_query.is_empty() {
+                &app.filtered_refs
+            } else {
+                &app.references
+            };
+            if let Some(entry) = active_refs.get(app.selected_reference) {
+                let key = entry.key.clone();
+                let doi = entry.doi().ok().unwrap_or_default();
+                match supp_dir_for_doi(&app.config.pdfs_dir, &doi) {
+                    Ok(dir) => {
+                        app.supp_view = Some(SuppView::new(key, dir));
+                        app.mode = Mode::Supplementary;
+                    }
+                    Err(e) => app.show_alert(&format!("'{}': {}", key, e)),
+                }
+            } else {
+                app.show_alert("No reference selected");
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('S')
+            if matches!(app.mode, Mode::Supplementary) =>
+        {
+            app.supp_view = None;
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::Supplementary) => {
+            if let Some(v) = &mut app.supp_view {
+                v.selected = v.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if matches!(app.mode, Mode::Supplementary) => {
+            if let Some(v) = &mut app.supp_view {
+                if v.selected + 1 < v.files.len() { v.selected += 1; }
+            }
+        }
+        KeyCode::Char('g') if matches!(app.mode, Mode::Supplementary) => {
+            if let Some(v) = &mut app.supp_view { v.selected = 0; }
+        }
+        KeyCode::Char('G') if matches!(app.mode, Mode::Supplementary) => {
+            if let Some(v) = &mut app.supp_view {
+                v.selected = v.files.len().saturating_sub(1);
+            }
+        }
+        KeyCode::Enter if matches!(app.mode, Mode::Supplementary) => {
+            if let Some(path) = app.supp_view.as_ref().and_then(|v| v.current().cloned()) {
+                open_detached(app, &path);
+            }
+        }
+        KeyCode::Char('o') if matches!(app.mode, Mode::Supplementary) => {
+            if let Some(dir) = app.supp_view.as_ref().map(|v| v.dir.clone()) {
+                if dir.is_dir() {
+                    open_detached(app, &dir);
+                } else {
+                    app.show_alert("No supplementary folder yet — press a to add files");
+                }
+            }
+        }
+        KeyCode::Char('y') if matches!(app.mode, Mode::Supplementary) => {
+            if let Some(path) = app.supp_view.as_ref().and_then(|v| v.current().cloned()) {
+                let text = path.to_string_lossy().to_string();
+                match app.clipboard.as_mut().map(|cb| cb.set_text(&text)) {
+                    Some(Ok(_))  => app.show_alert("Copied path to clipboard"),
+                    Some(Err(e)) => app.show_alert(&format!("Clipboard error: {e}")),
+                    None         => app.show_alert("Clipboard not available"),
+                }
+            }
+        }
+        KeyCode::Char('a') if matches!(app.mode, Mode::Supplementary) => {
+            let start = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            app.file_browser = Some(FileBrowser::new(start, FileBrowserMode::Supplementary));
+            app.mode = Mode::FileBrowser;
+        }
+
         // ── Show logs ─────────────────────────────────────
         KeyCode::Char('L') if matches!(app.mode, Mode::Normal) => {
             let log_path = app.log_path.to_string_lossy().to_string();
@@ -872,6 +959,20 @@ fn handle_file_browser_enter(
 
     let browser_mode = fb.browser_mode;
     let multi: Vec<std::path::PathBuf> = fb.multi_selected.iter().cloned().collect();
+
+    if browser_mode == FileBrowserMode::Supplementary {
+        let sources = if !multi.is_empty() {
+            multi
+        } else {
+            match fb.enter() {
+                Some(path) => vec![path],
+                None => return, // descended into a directory
+            }
+        };
+        app.file_browser = None;
+        add_supplementary(app, sources);
+        return;
+    }
 
     if !multi.is_empty() {
         app.file_browser = None;
@@ -1116,6 +1217,36 @@ fn handle_file_browser_enter(
             _ => {}
         }
     }
+}
+
+/// Copy `sources` into the open supplementary popup's folder and return to it.
+fn add_supplementary(app: &mut App, mut sources: Vec<std::path::PathBuf>) {
+    sources.sort();
+    let Some((key, dir)) = app.supp_view.as_ref().map(|v| (v.key.clone(), v.dir.clone())) else {
+        app.mode = Mode::Normal;
+        return;
+    };
+    app.log(&format!("Adding {} supplementary file(s) to '{}' ({})", sources.len(), key, dir.display()));
+    match add_supp_files(&dir, &sources) {
+        Ok((copied, skipped)) => {
+            for p in &copied  { app.log(&format!("  copied {}", p.display())); }
+            for p in &skipped { app.log(&format!("  skipped (name exists) {}", p.display())); }
+            if skipped.is_empty() {
+                app.show_alert(&format!("Added {} file(s) to '{}'", copied.len(), key));
+            } else {
+                app.show_alert(&format!(
+                    "Added {} file(s), skipped {} already present",
+                    copied.len(), skipped.len()
+                ));
+            }
+        }
+        Err(e) => {
+            app.log(&format!("  failed: {}", e));
+            app.show_alert(&format!("Adding files failed: {e}"));
+        }
+    }
+    if let Some(v) = &mut app.supp_view { v.refresh(); }
+    app.mode = Mode::Supplementary;
 }
 
 /// Queue DOI-list files and hand over to the project picker.

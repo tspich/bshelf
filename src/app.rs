@@ -39,6 +39,7 @@ pub enum Mode {
     PdfDoi,
     ImportProject,
     ImportNewProject,
+    Supplementary,
 }
 
 pub fn mode_name(mode: &Mode) -> &'static str {
@@ -57,6 +58,7 @@ pub fn mode_name(mode: &Mode) -> &'static str {
         Mode::PdfDoi           => "PDF",
         Mode::ImportProject    => "IMPORT TO",
         Mode::ImportNewProject => "IMPORT NEW PROJECT",
+        Mode::Supplementary    => "SUPPLEMENTARY",
     }
 }
 
@@ -69,6 +71,8 @@ pub enum FileBrowserMode {
     Bib,
     Pdf,
     DoiList,
+    /// Adding supplementary files: anything goes.
+    Supplementary,
 }
 
 impl FileBrowserMode {
@@ -82,7 +86,34 @@ impl FileBrowserMode {
             FileBrowserMode::DoiList => {
                 matches!(ext, None | Some("txt") | Some("text") | Some("doi") | Some("dois"))
             }
+            FileBrowserMode::Supplementary => true,
         }
+    }
+}
+
+/// State of the supplementary-files popup (`S`) for one entry.
+pub struct SuppView {
+    pub key: String,
+    /// `{pdfs_dir}/{doi-stem}/` — may not exist until files are added.
+    pub dir: std::path::PathBuf,
+    pub files: Vec<std::path::PathBuf>,
+    pub selected: usize,
+}
+
+impl SuppView {
+    pub fn new(key: String, dir: std::path::PathBuf) -> Self {
+        let mut v = SuppView { key, dir, files: Vec::new(), selected: 0 };
+        v.refresh();
+        v
+    }
+
+    pub fn refresh(&mut self) {
+        self.files = bshelf::list_supp_files(&self.dir);
+        self.selected = self.selected.min(self.files.len().saturating_sub(1));
+    }
+
+    pub fn current(&self) -> Option<&std::path::PathBuf> {
+        self.files.get(self.selected)
     }
 }
 
@@ -235,6 +266,7 @@ pub struct App {
     pub import_new_project_name: String,
     pub search_all_refs: Vec<Entry>,
     pub log_path: std::path::PathBuf,
+    pub supp_view: Option<SuppView>,
 }
 
 impl App {
@@ -285,6 +317,7 @@ impl App {
             import_new_project_name: String::new(),
             search_all_refs: Vec::new(),
             log_path,
+            supp_view: None,
         }
     }
 
