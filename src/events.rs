@@ -709,6 +709,17 @@ pub fn handle_key(
         }
 
         // ── File browser ──────────────────────────────────────────────────────
+        // While typing a filter, every character (including '/' and ' ',
+        // which have their own meaning otherwise) goes into the filter.
+        KeyCode::Char(c)
+            if matches!(app.mode, Mode::FileBrowser)
+                && app.file_browser.as_ref().is_some_and(|fb| fb.filtering) =>
+        {
+            if let Some(fb) = &mut app.file_browser {
+                fb.filter.push(c);
+                fb.selected = 1;
+            }
+        }
         KeyCode::Char('/') if matches!(app.mode, Mode::FileBrowser) => {
             if let Some(fb) = &mut app.file_browser {
                 fb.filtering = true;
@@ -718,10 +729,12 @@ pub fn handle_key(
         }
         KeyCode::Esc if matches!(app.mode, Mode::FileBrowser) => {
             if let Some(fb) = &mut app.file_browser {
-                if fb.filtering {
+                if fb.filtering || !fb.filter.is_empty() {
+                    // First Esc drops the filter (while typing or after
+                    // Enter); only a second one closes the browser.
                     fb.filtering = false;
                     fb.filter.clear();
-                    fb.selected = 0;
+                    fb.selected = 1.min(fb.visible_entries().len().saturating_sub(1));
                 } else {
                     // Adding supplementary files was started from that
                     // popup, so cancelling goes back to it.
@@ -734,22 +747,16 @@ pub fn handle_key(
             }
         }
         KeyCode::Up | KeyCode::Char('k') if matches!(app.mode, Mode::FileBrowser) => {
+            // Typed 'k' is caught by the filtering arm above, so this is
+            // navigation only (arrow keys also work while typing).
             if let Some(fb) = &mut app.file_browser {
-                if fb.filtering{
-                    fb.filter.push('k');
-                } else if fb.selected > 0 { 
-                    fb.selected -= 1; 
-                }
+                if fb.selected > 0 { fb.selected -= 1; }
             }
         }
         KeyCode::Down | KeyCode::Char('j') if matches!(app.mode, Mode::FileBrowser) => {
             if let Some(fb) = &mut app.file_browser {
-                if fb.filtering {
-                    fb.filter.push('j');
-                } else {
-                    let count = fb.visible_entries().len();
-                    if fb.selected + 1 < count { fb.selected += 1; }
-                }
+                let count = fb.visible_entries().len();
+                if fb.selected + 1 < count { fb.selected += 1; }
             }
         }
         KeyCode::Char(' ') if matches!(app.mode, Mode::FileBrowser) => {
@@ -796,7 +803,17 @@ pub fn handle_key(
             }
         }
         KeyCode::Enter if matches!(app.mode, Mode::FileBrowser) => {
-            handle_file_browser_enter(app, terminal);
+            // Enter while typing a filter only finishes typing: the filtered
+            // list stays, j/k move in it, and the next Enter selects.
+            let finishing_filter = app.file_browser.as_ref().is_some_and(|fb| fb.filtering);
+            if finishing_filter {
+                if let Some(fb) = &mut app.file_browser {
+                    fb.filtering = false;
+                    fb.selected = 1.min(fb.visible_entries().len().saturating_sub(1));
+                }
+            } else {
+                handle_file_browser_enter(app, terminal);
+            }
         }
 
         // ── Import project picker ─────────────────────────────────────────────

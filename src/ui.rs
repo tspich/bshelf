@@ -547,7 +547,7 @@ fn draw_file_browser(f: &mut Frame, app: &App) {
     let count = fb.multi_selected.len();
     let import_n = format!("Enter: import {count} selected");
     let hint_items: Vec<&str> = if fb.filtering {
-        vec!["Enter: apply", "Esc: cancel filter"]
+        vec!["Enter: done typing", "↑/↓: move", "Esc: clear filter"]
     } else if count > 0 {
         vec!["Space: toggle", &import_n, "Esc: close"]
     } else {
